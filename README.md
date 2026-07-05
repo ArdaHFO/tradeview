@@ -11,11 +11,18 @@ float < 50M, günlük range ≥ %4 → heat skoruna göre sıralı watchlist.
 aile (konum/VWAP, **order flow/CVD**, yapı, volatilite) ile confluence skorlaması
 (eşik 0.65) — 3 setup şablonu:
 
-| Setup | Pencere | Tetik |
-|---|---|---|
-| `GAP_AND_GO` | İlk 60 dk | Gap + VWAP üstü + CVD pozitif/artan + 5dk-high kırılımı |
-| `VWAP_REVERSION` | 30 dk sonrası | VWAP'tan ≥2 ATR + CVD divergence + tape yavaşlama |
-| `ORB` | 15 dk sonrası | Opening range kırılımı + hacim spike + CVD teyidi |
+| Setup | Pencere | Tetik | Durum |
+|---|---|---|---|
+| `GAP_AND_GO` | İlk 60 dk | Gap + VWAP üstü + CVD pozitif/artan + 5dk-high kırılımı | ⛔ varsayılan kapalı |
+| `VWAP_REVERSION` | 30 dk sonrası | VWAP'tan ≥2 ATR + CVD divergence + tape yavaşlama | ✅ aktif |
+| `ORB` | 15 dk sonrası | Opening range kırılımı + hacim spike + CVD teyidi | ⛔ varsayılan kapalı |
+
+**2026-07 backtest bulgusu:** aynı 15 günlük pencerede (161 işlem taban) GAP_AND_GO ve
+ORB tutarlı şekilde zararda çıktı (sırasıyla PF 0.35-0.46, iki ayrı parametre
+düzeltmesinden sonra da), VWAP_REVERSION ise tek başına PF 1.23 (55 işlem, %51 win)
+verdi. İkisi de `cfg.signal.disabled_setups` üzerinden varsayılan olarak kapatıldı —
+kod silinmedi, farklı bir piyasa rejiminde tekrar denenebilir. Detaylar için
+`git log --oneline` üzerinde `gap_and_go:` ve `orb:` commit mesajlarına bakın.
 
 **Risk** (`risk.py`): işlem başına %0.5 equity, ATR-stop sizing, günlük -%2
 kill-switch, PDT sayacı, kapanışa son 15 dk giriş yasağı.
