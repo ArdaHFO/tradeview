@@ -11,7 +11,7 @@ from ..models import FamilyScores, SetupCandidate, SetupType, Side
 from ..session import is_rth, minutes_since_open
 from .base import Strategy, SymbolContext, clamp01
 
-VOLUME_SPIKE_MULT = 2.0
+VOLUME_SPIKE_MULT = 3.0  # raised from 2.0 -- backtest showed weak spikes -> false breakouts
 
 
 class OpeningRangeBreakout(Strategy):

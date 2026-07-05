@@ -52,7 +52,9 @@ class SignalConfig:
     min_stop_slippage_mult: float = 10.0  # skip if |entry-stop| < N * one-side slippage
     disabled_setups: str = ""            # comma-separated SetupType names to turn off
     vwap_reversion_atr_dist: float = 2.0  # min ATRs from VWAP to consider a fade
-    opening_range_minutes: int = 15
+    # Widened from 15 -- backtest showed the 15-min range was too noisy/unstable,
+    # causing frequent false ORB breakouts.
+    opening_range_minutes: int = 30
     large_print_multiple: float = 10.0    # trade size >= 10x avg size = large print
 
 

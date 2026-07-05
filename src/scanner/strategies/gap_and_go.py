@@ -2,8 +2,10 @@
 
 LONG trigger (mirror for SHORT on a gap-down):
   gap >= +4% (screener) AND first 60 min AND price above VWAP
-  AND CVD positive & rising AND price breaks the first-5-minute high.
-Stop: max(VWAP, 5-min low) minus a small ATR cushion.
+  AND CVD positive & rising AND price breaks the first-5-minute high
+  by a small ATR margin (filters noise-level false breakouts).
+Stop: max(VWAP, 5-min low) minus a 0.75 ATR cushion (widened from 0.25 --
+backtest showed the tighter stop got whipsawed out during opening-drive noise).
 """
 from __future__ import annotations
 
@@ -43,10 +45,10 @@ class GapAndGo(Strategy):
         if side == Side.LONG:
             if price <= vwap:
                 return None                       # wrong side of VWAP: no trade
-            if price <= early_high:
-                return None                       # no breakout yet
+            if price <= early_high + 0.1 * atr_1m:
+                return None                       # no breakout yet (with margin vs. noise)
             entry = price
-            stop = max(vwap, early_low) - 0.25 * atr_1m
+            stop = max(vwap, early_low) - 0.75 * atr_1m
             position = clamp01((price - vwap) / (2.0 * atr_1m) + 0.5)
             flow_score = clamp01(0.5 * clamp01(imb / 0.3)            # imbalance vs +30%
                                  + 0.5 * (1.0 if (slope or 0) > 0 and ctx.flow.cvd > 0
@@ -55,10 +57,10 @@ class GapAndGo(Strategy):
             reasons += [f"above VWAP {vwap:.2f}", f"broke 5m high {early_high:.2f}",
                         f"taker imb {imb:+.2f}", f"CVD {ctx.flow.cvd:+.0f}"]
         else:
-            if price >= vwap or price >= early_low:
+            if price >= vwap or price >= early_low - 0.1 * atr_1m:
                 return None
             entry = price
-            stop = min(vwap, early_high) + 0.25 * atr_1m
+            stop = min(vwap, early_high) + 0.75 * atr_1m
             position = clamp01((vwap - price) / (2.0 * atr_1m) + 0.5)
             flow_score = clamp01(0.5 * clamp01(-imb / 0.3)
                                  + 0.5 * (1.0 if (slope or 0) < 0 and ctx.flow.cvd < 0
