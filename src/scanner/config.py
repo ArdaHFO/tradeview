@@ -50,7 +50,10 @@ class SignalConfig:
     slippage_bps: float = 20.0           # per-side slippage in basis points (backtest)
     cooldown_minutes: int = 30           # per symbol+setup re-alert lockout
     min_stop_slippage_mult: float = 10.0  # skip if |entry-stop| < N * one-side slippage
-    disabled_setups: str = ""            # comma-separated SetupType names to turn off
+    # GAP_AND_GO disabled by default: 15-day backtest showed consistent losses
+    # (PF 0.35-0.43 across two parameter-fix attempts -- widened stop, breakout
+    # margin, and a hard order-flow gate all failed to make it profitable).
+    disabled_setups: str = "GAP_AND_GO"  # comma-separated SetupType names to turn off
     vwap_reversion_atr_dist: float = 2.0  # min ATRs from VWAP to consider a fade
     # Widened from 15 -- backtest showed the 15-min range was too noisy/unstable,
     # causing frequent false ORB breakouts.

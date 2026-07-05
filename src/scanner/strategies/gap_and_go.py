@@ -16,6 +16,7 @@ from ..session import is_opening_drive
 from .base import Strategy, SymbolContext, clamp01
 
 EARLY_RANGE_BARS = 5  # first 5 one-minute bars define the launch range
+MIN_TAKER_IMBALANCE = 0.15  # order flow must clear this before a breakout counts
 
 
 class GapAndGo(Strategy):
@@ -47,6 +48,8 @@ class GapAndGo(Strategy):
                 return None                       # wrong side of VWAP: no trade
             if price <= early_high + 0.1 * atr_1m:
                 return None                       # no breakout yet (with margin vs. noise)
+            if imb < MIN_TAKER_IMBALANCE or (slope or 0) <= 0:
+                return None                       # order flow must actually confirm, not just score
             entry = price
             stop = max(vwap, early_low) - 0.75 * atr_1m
             position = clamp01((price - vwap) / (2.0 * atr_1m) + 0.5)
@@ -59,6 +62,8 @@ class GapAndGo(Strategy):
         else:
             if price >= vwap or price >= early_low - 0.1 * atr_1m:
                 return None
+            if imb > -MIN_TAKER_IMBALANCE or (slope or 0) >= 0:
+                return None                       # order flow must actually confirm, not just score
             entry = price
             stop = min(vwap, early_high) + 0.75 * atr_1m
             position = clamp01((vwap - price) / (2.0 * atr_1m) + 0.5)

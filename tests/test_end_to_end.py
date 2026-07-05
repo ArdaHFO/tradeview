@@ -6,6 +6,7 @@ from scanner.models import SetupType, Side
 
 def test_demo_pipeline_produces_gap_and_go():
     cfg = Config()
+    cfg.signal.disabled_setups = ""  # GAP_AND_GO is off by default in production; re-enable to test it
     watchlist, signals = run_demo(cfg)
 
     # Stage 1: only the hot gapper survives
