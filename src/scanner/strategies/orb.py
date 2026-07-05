@@ -12,6 +12,8 @@ from ..session import is_rth, minutes_since_open
 from .base import Strategy, SymbolContext, clamp01
 
 VOLUME_SPIKE_MULT = 3.0  # raised from 2.0 -- backtest showed weak spikes -> false breakouts
+MIN_TAKER_IMBALANCE = 0.15  # sign-only agreement was too weak; require real magnitude
+BREAKOUT_MARGIN_ATR = 0.1   # require a clear break past the range, not a tick over it
 
 
 class OpeningRangeBreakout(Strategy):
@@ -36,18 +38,18 @@ class OpeningRangeBreakout(Strategy):
         imb = ctx.flow.taker_imbalance()
         slope = ctx.flow.cvd_slope(minutes=3) or 0.0
 
-        if price > or_high:
+        if price > or_high + BREAKOUT_MARGIN_ATR * atr_1m:
             side = Side.LONG
-            # order flow must agree with the breakout direction, else it's suspect
-            if slope <= 0 or imb <= 0:
+            # order flow must clearly agree with the breakout direction
+            if slope <= 0 or imb < MIN_TAKER_IMBALANCE:
                 return None
             entry = price
             stop = max(or_low, entry - 1.5 * atr_1m)
             depth = (price - or_high) / atr_1m
             reasons = [f"broke OR high {or_high:.2f}"]
-        elif price < or_low:
+        elif price < or_low - BREAKOUT_MARGIN_ATR * atr_1m:
             side = Side.SHORT
-            if slope >= 0 or imb >= 0:
+            if slope >= 0 or imb > -MIN_TAKER_IMBALANCE:
                 return None
             entry = price
             stop = min(or_high, entry + 1.5 * atr_1m)
