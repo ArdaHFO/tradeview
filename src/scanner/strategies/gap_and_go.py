@@ -17,6 +17,9 @@ from .base import Strategy, SymbolContext, clamp01
 
 EARLY_RANGE_BARS = 5  # first 5 one-minute bars define the launch range
 MIN_TAKER_IMBALANCE = 0.15  # order flow must clear this before a breakout counts
+# Trading literature flags 3-7% as the best risk-adjusted gap band; beyond ~20%
+# the move is often already exhausted/news-overextended and prone to snapping back.
+MAX_GAP_PCT = 20.0
 
 
 class GapAndGo(Strategy):
@@ -27,6 +30,8 @@ class GapAndGo(Strategy):
             return None
         if len(ctx.bars_1m) <= EARLY_RANGE_BARS:
             return None
+        if abs(ctx.gap_pct) > MAX_GAP_PCT:
+            return None                           # overextended gap: skip, prone to reversal
         price = ctx.last_price
         vwap = ctx.vwap.value
         atr_1m = ctx.atr_now()
