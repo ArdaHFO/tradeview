@@ -1,7 +1,7 @@
 import pytest
 
 from forecaster.technical.indicators import (
-    bollinger_bands, ema, macd, rsi, sma, volume_trend,
+    bollinger_bands, ema, macd, rsi, sma, supertrend, volume_trend,
 )
 
 
@@ -52,3 +52,21 @@ def test_volume_trend_ratio():
     out = volume_trend(volumes, period=20)
     # window at the last index is volumes[1:21]: 19x100 + 1x300, avg=110
     assert out[-1] == pytest.approx(300.0 / 110.0)
+
+
+def test_supertrend_follows_uptrend():
+    closes = [100 + i * 0.8 for i in range(80)]
+    highs = [c + 1 for c in closes]
+    lows = [c - 1 for c in closes]
+    upper, lower, direction, line = supertrend(highs, lows, closes, period=10, multiplier=3.0)
+    assert direction[-1] == 1
+    assert line[-1] is not None
+    assert upper[-1] is not None and lower[-1] is not None
+
+
+def test_supertrend_follows_downtrend():
+    closes = [200 - i * 0.8 for i in range(80)]
+    highs = [c + 1 for c in closes]
+    lows = [c - 1 for c in closes]
+    _, _, direction, _ = supertrend(highs, lows, closes, period=10, multiplier=3.0)
+    assert direction[-1] == -1

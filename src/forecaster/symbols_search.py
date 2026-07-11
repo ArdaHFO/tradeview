@@ -9,7 +9,7 @@ log = logging.getLogger(__name__)
 
 
 def search_symbols(query: str, limit: int = 8) -> list[dict]:
-    """Search US-listed equities by ticker or company name."""
+    """Search equities by ticker or company name across supported Yahoo Finance listings."""
     query = query.strip()
     if not query:
         return []
@@ -23,8 +23,8 @@ def search_symbols(query: str, limit: int = 8) -> list[dict]:
     seen: set[str] = set()
     for q in results:
         sym = q.get("symbol", "")
-        if not sym or sym in seen or "." in sym or "-" in sym:
-            continue  # skip dual-class/foreign-listed suffixes
+        if not sym or sym in seen:
+            continue
         if q.get("quoteType") != "EQUITY":
             continue
         seen.add(sym)

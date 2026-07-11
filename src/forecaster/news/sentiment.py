@@ -1,13 +1,17 @@
-"""Claude-based news sentiment: batch all of a symbol's articles into one call."""
+"""Groq-based news sentiment: batch all of a symbol's articles into one call."""
 from __future__ import annotations
 
 import json
 import logging
-
-import anthropic
+from types import SimpleNamespace
 
 from ..config import Config
 from ..models import Direction, NewsArticle, NewsVerdict
+
+try:
+    import groq  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency for tests/local runs
+    groq = SimpleNamespace(Groq=None)
 
 log = logging.getLogger(__name__)
 
@@ -50,41 +54,60 @@ def analyze_news(symbol: str, articles: list[NewsArticle], cfg: Config) -> NewsV
             rationale="no recent news found", article_count=0,
         )
 
-    if not cfg.anthropic_api_key:
-        log.warning("ANTHROPIC_API_KEY not set; skipping sentiment analysis for %s", symbol)
+    if not cfg.groq_api_key:
+        log.warning("GROQ_API_KEY not set; skipping sentiment analysis for %s", symbol)
         return NewsVerdict(
             symbol=symbol, direction=Direction.NEUTRAL, score=0.0, confidence=0.0,
-            rationale="NEWS_UNAVAILABLE (no API key)", article_count=len(articles),
+            rationale="NEWS_UNAVAILABLE (no Groq API key)", article_count=len(articles),
         )
 
-    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+    global groq
+    if getattr(groq, "Groq", None) is None:
+        try:
+            import groq as groq_module  # type: ignore
+        except ImportError:
+            log.warning("groq package not installed; skipping sentiment analysis for %s", symbol)
+            return NewsVerdict(
+                symbol=symbol, direction=Direction.NEUTRAL, score=0.0, confidence=0.0,
+                rationale="NEWS_UNAVAILABLE (groq missing)", article_count=len(articles),
+            )
+        groq = groq_module
+
+    client = groq.Groq(api_key=cfg.groq_api_key)
     try:
-        response = client.messages.create(
-            model=cfg.claude_model,
+        response = client.chat.completions.create(
+            model=cfg.groq_model,
+            temperature=0.2,
             max_tokens=1024,
-            system=_SYSTEM,
-            output_config={"effort": "medium", "format": {"type": "json_schema", "schema": _SCHEMA}},
-            messages=[{"role": "user", "content": _build_prompt(symbol, articles)}],
+            messages=[
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": _build_prompt(symbol, articles)},
+            ],
         )
-    except (anthropic.APIError, anthropic.APIConnectionError) as exc:
-        log.warning("claude sentiment call failed for %s: %s", symbol, exc)
+    except Exception as exc:
+        log.warning("groq sentiment call failed for %s: %s", symbol, exc)
         return NewsVerdict(
             symbol=symbol, direction=Direction.NEUTRAL, score=0.0, confidence=0.0,
             rationale="NEWS_UNAVAILABLE (API error)", article_count=len(articles),
         )
 
-    if response.stop_reason == "refusal":
-        log.warning("claude sentiment refused for %s", symbol)
+    content = getattr(response.choices[0].message, "content", "")
+    if not content:
+        log.warning("groq sentiment returned empty content for %s", symbol)
         return NewsVerdict(
             symbol=symbol, direction=Direction.NEUTRAL, score=0.0, confidence=0.0,
-            rationale="NEWS_UNAVAILABLE (refused)", article_count=len(articles),
+            rationale="NEWS_UNAVAILABLE (empty response)", article_count=len(articles),
         )
 
-    text = next((b.text for b in response.content if b.type == "text"), "")
+    if isinstance(content, list):
+        text = "".join(getattr(part, "text", "") for part in content)
+    else:
+        text = str(content)
+
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        log.warning("claude sentiment returned invalid JSON for %s: %r", symbol, text)
+        log.warning("groq sentiment returned invalid JSON for %s: %r", symbol, text)
         return NewsVerdict(
             symbol=symbol, direction=Direction.NEUTRAL, score=0.0, confidence=0.0,
             rationale="NEWS_UNAVAILABLE (bad JSON)", article_count=len(articles),

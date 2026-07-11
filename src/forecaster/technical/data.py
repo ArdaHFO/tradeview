@@ -1,4 +1,4 @@
-"""Daily OHLCV bars via yfinance (free, no API key)."""
+"""OHLCV bars via yfinance (free, no API key)."""
 from __future__ import annotations
 
 import logging
@@ -11,12 +11,28 @@ from ..models import Bar
 
 log = logging.getLogger(__name__)
 
+_TIMEFRAME_SPECS: dict[str, tuple[str, str]] = {
+    "30m": ("30m", "60d"),
+    "1h": ("60m", "730d"),
+    "1d": ("1d", "6mo"),
+    "1wk": ("1wk", "5y"),
+    "1mo": ("1mo", "10y"),
+}
 
-def fetch_daily_bars(symbol: str, cfg: Config) -> list[Bar]:
-    df = yf.download(symbol, period=cfg.technical_lookback_period, interval="1d",
+
+def _resolve_timeframe(cfg: Config, timeframe: str) -> tuple[str, str]:
+    interval, default_period = _TIMEFRAME_SPECS.get(timeframe, (timeframe, cfg.technical_lookback_period))
+    if timeframe in {"30m", "1h"}:
+        return interval, cfg.intraday_lookback_period
+    return interval, default_period
+
+
+def fetch_bars(symbol: str, cfg: Config, timeframe: str = "1d") -> list[Bar]:
+    interval, period = _resolve_timeframe(cfg, timeframe)
+    df = yf.download(symbol, period=period, interval=interval,
                       progress=False, auto_adjust=False)
     if df is None or df.empty:
-        log.warning("no daily bars for %s", symbol)
+        log.warning("no bars for %s at %s", symbol, timeframe)
         return []
     if isinstance(df.columns, type(df.columns)) and df.columns.nlevels > 1:
         df.columns = df.columns.get_level_values(0)
@@ -32,6 +48,10 @@ def fetch_daily_bars(symbol: str, cfg: Config) -> list[Bar]:
     return bars
 
 
-def latest_close(symbol: str, cfg: Config) -> float | None:
-    bars = fetch_daily_bars(symbol, cfg)
+def fetch_daily_bars(symbol: str, cfg: Config) -> list[Bar]:
+    return fetch_bars(symbol, cfg, "1d")
+
+
+def latest_close(symbol: str, cfg: Config, timeframe: str = "1d") -> float | None:
+    bars = fetch_bars(symbol, cfg, timeframe)
     return bars[-1].close if bars else None

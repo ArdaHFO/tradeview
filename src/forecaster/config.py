@@ -23,8 +23,8 @@ def _env_int(name: str, default: int) -> int:
 
 @dataclass
 class Config:
-    anthropic_api_key: str = field(
-        default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY", ""))
+    groq_api_key: str = field(
+        default_factory=lambda: os.environ.get("GROQ_API_KEY", ""))
     db_path: str = field(
         default_factory=lambda: os.environ.get("FORECASTER_DB_PATH", "predictions.db"))
     watchlist_path: str = field(
@@ -38,6 +38,9 @@ class Config:
         default_factory=lambda: _env_int("MAX_ARTICLES_PER_SYMBOL", 10))
     dedupe_similarity_threshold: float = 0.85
 
+    intraday_lookback_period: str = field(
+        default_factory=lambda: os.environ.get("INTRADAY_LOOKBACK_PERIOD", "60d"))
+
     news_weight: float = field(
         default_factory=lambda: _env_float("NEWS_WEIGHT", 0.5))
     technical_weight: float = field(
@@ -45,8 +48,8 @@ class Config:
     neutral_band: float = field(
         default_factory=lambda: _env_float("NEUTRAL_BAND", 0.15))
 
-    claude_model: str = field(
-        default_factory=lambda: os.environ.get("CLAUDE_MODEL", "claude-opus-4-8"))
+    groq_model: str = field(
+        default_factory=lambda: os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile"))
 
     technical_lookback_period: str = "6mo"
     max_symbols_per_run: int = field(

@@ -63,6 +63,9 @@ class Prediction:
     final_direction: Direction
     final_confidence: float
     price_at_prediction: float
+    timeframe: str = "1d"
+    profile: str = "balanced"
+    news_sources: str = "google"
     actual_next_close: float | None = None
     actual_direction: Direction | None = None
     hit: bool | None = None

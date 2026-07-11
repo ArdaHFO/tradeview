@@ -1,11 +1,11 @@
 """Rule-based technical confluence score in [-1, 1].
 
-Weights: trend 40%, momentum 30%, volume confirmation 20%, Bollinger position 10%.
+Weights: trend 40%, momentum 25%, volume confirmation 15%, Bollinger position 10%, Supertrend 10%.
 """
 from __future__ import annotations
 
 from ..models import Bar, TechnicalVerdict
-from .indicators import bollinger_bands, ema, macd, rsi, sma, volume_trend
+from .indicators import bollinger_bands, ema, macd, rsi, sma, supertrend, volume_trend
 
 
 def _clamp(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
@@ -17,6 +17,8 @@ def score_technical(symbol: str, bars: list[Bar]) -> TechnicalVerdict:
         return TechnicalVerdict(symbol=symbol, score=0.0, reasons=["insufficient price history"])
 
     closes = [b.close for b in bars]
+    highs = [b.high for b in bars]
+    lows = [b.low for b in bars]
     volumes = [b.volume for b in bars]
     last = -1
     reasons: list[str] = []
@@ -28,6 +30,7 @@ def score_technical(symbol: str, bars: list[Bar]) -> TechnicalVerdict:
     _, _, hist = macd(closes)
     upper, mid, lower = bollinger_bands(closes)
     vtrend = volume_trend(volumes)
+    _, _, st_dir, st_line = supertrend(highs, lows, closes, period=10, multiplier=3.0)
 
     trend_parts: list[float] = []
     if sma50[last] is not None and sma200[last] is not None:
@@ -38,6 +41,10 @@ def score_technical(symbol: str, bars: list[Bar]) -> TechnicalVerdict:
         sign = 1.0 if closes[last] > ema20[last] else -1.0
         trend_parts.append(sign)
         reasons.append(f"price {'above' if sign > 0 else 'below'} EMA20")
+    if st_dir[last] is not None and st_line[last] is not None:
+        sign = float(st_dir[last])
+        trend_parts.append(sign)
+        reasons.append(f"Supertrend {'bullish' if sign > 0 else 'bearish'}")
     trend_score = sum(trend_parts) / len(trend_parts) if trend_parts else 0.0
 
     momentum_parts: list[float] = []
@@ -62,6 +69,7 @@ def score_technical(symbol: str, bars: list[Bar]) -> TechnicalVerdict:
             position_score = _clamp((closes[last] - mid[last]) / band_half_width)
             reasons.append(f"Bollinger position {position_score:+.2f}")
 
-    final = _clamp(0.40 * trend_score + 0.30 * momentum_score
-                    + 0.20 * volume_score + 0.10 * position_score)
+    final = _clamp(0.40 * trend_score + 0.25 * momentum_score
+                    + 0.15 * volume_score + 0.10 * position_score
+                    + 0.10 * (1.0 if st_dir[last] == 1 else (-1.0 if st_dir[last] == -1 else 0.0)))
     return TechnicalVerdict(symbol=symbol, score=final, reasons=reasons)

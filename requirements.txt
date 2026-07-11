@@ -1,6 +1,6 @@
 yfinance
 feedparser
-anthropic
+groq
 python-dotenv
 pytest
 fastapi

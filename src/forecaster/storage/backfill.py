@@ -25,7 +25,7 @@ def run(cfg: Config) -> None:
     try:
         rows = recorder.unresolved()
         for row in rows:
-            price = latest_close(row["symbol"], cfg)
+            price = latest_close(row["symbol"], cfg, row["timeframe"])
             if price is None:
                 continue
             actual = _actual_direction(row["price_at_prediction"], price)

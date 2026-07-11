@@ -1,4 +1,4 @@
-"""Classic indicators: EMA, SMA, RSI (Wilder), MACD, Bollinger Bands, volume trend.
+"""Classic indicators: EMA, SMA, RSI (Wilder), MACD, Bollinger Bands, Supertrend, volume trend.
 
 Pure functions over lists of floats -- no pandas dependency, easy to test.
 All functions return a list aligned with the input; warm-up positions are None.
@@ -107,3 +107,76 @@ def volume_trend(volumes: list[float], period: int = 20) -> list[float | None]:
         (v / a) if a is not None and a > 0 else None
         for v, a in zip(volumes, avg)
     ]
+
+
+def atr(highs: list[float], lows: list[float], closes: list[float], period: int = 10) -> list[float | None]:
+    """Average True Range using Wilder smoothing."""
+    if not (len(highs) == len(lows) == len(closes)):
+        raise ValueError("highs, lows, and closes must have the same length")
+    if period <= 0:
+        raise ValueError("period must be positive")
+    if len(closes) < period + 1:
+        return [None] * len(closes)
+
+    tr: list[float] = [highs[0] - lows[0]]
+    for i in range(1, len(closes)):
+        tr.append(max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        ))
+
+    out: list[float | None] = [None] * len(closes)
+    seed = sum(tr[:period]) / period
+    out[period - 1] = seed
+    prev = seed
+    for i in range(period, len(closes)):
+        prev = (prev * (period - 1) + tr[i]) / period
+        out[i] = prev
+    return out
+
+
+def supertrend(highs: list[float], lows: list[float], closes: list[float], period: int = 10,
+               multiplier: float = 3.0) -> tuple[list[float | None], list[float | None], list[int | None], list[float | None]]:
+    """Returns (upper_band, lower_band, direction, supertrend_line). Direction is 1 for up, -1 for down."""
+    if not (len(highs) == len(lows) == len(closes)):
+        raise ValueError("highs, lows, and closes must have the same length")
+    atr_values = atr(highs, lows, closes, period)
+    upper_band: list[float | None] = [None] * len(closes)
+    lower_band: list[float | None] = [None] * len(closes)
+    direction: list[int | None] = [None] * len(closes)
+    line: list[float | None] = [None] * len(closes)
+
+    for i in range(len(closes)):
+        atr_value = atr_values[i]
+        if atr_value is None:
+            continue
+        hl2 = (highs[i] + lows[i]) / 2.0
+        basic_upper = hl2 + multiplier * atr_value
+        basic_lower = hl2 - multiplier * atr_value
+
+        if i == 0:
+            upper_band[i] = basic_upper
+            lower_band[i] = basic_lower
+            direction[i] = 1
+            line[i] = basic_lower
+            continue
+
+        prev_upper = upper_band[i - 1] if upper_band[i - 1] is not None else basic_upper
+        prev_lower = lower_band[i - 1] if lower_band[i - 1] is not None else basic_lower
+        prev_close = closes[i - 1]
+
+        upper_band[i] = basic_upper if basic_upper < prev_upper or prev_close > prev_upper else prev_upper
+        lower_band[i] = basic_lower if basic_lower > prev_lower or prev_close < prev_lower else prev_lower
+
+        prev_direction = direction[i - 1] or 1
+        if closes[i] > prev_upper:
+            direction[i] = 1
+        elif closes[i] < prev_lower:
+            direction[i] = -1
+        else:
+            direction[i] = prev_direction
+
+        line[i] = lower_band[i] if direction[i] == 1 else upper_band[i]
+
+    return upper_band, lower_band, direction, line

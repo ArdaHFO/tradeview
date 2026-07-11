@@ -4,7 +4,7 @@ from forecaster.models import Direction, NewsVerdict, TechnicalVerdict
 
 
 def _cfg(**overrides) -> Config:
-    cfg = Config(anthropic_api_key="x")
+    cfg = Config(groq_api_key="x")
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg

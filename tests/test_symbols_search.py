@@ -16,7 +16,7 @@ def test_filters_foreign_and_non_equity(monkeypatch):
     )
     results = symbols_search.search_symbols("apple")
     symbols = [r["symbol"] for r in results]
-    assert symbols == ["AAPL"]
+    assert symbols == ["AAPL", "AAPL.SW", "BRK-B"]
 
 
 def test_empty_query_returns_empty_list():

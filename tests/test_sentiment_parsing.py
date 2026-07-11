@@ -8,7 +8,7 @@ from forecaster.news import sentiment
 
 
 def _cfg() -> Config:
-    return Config(anthropic_api_key="fake-key")
+    return Config(groq_api_key="fake-key")
 
 
 def _article() -> NewsArticle:
@@ -18,8 +18,7 @@ def _article() -> NewsArticle:
 
 def _fake_response(stop_reason: str, text: str) -> SimpleNamespace:
     return SimpleNamespace(
-        stop_reason=stop_reason,
-        content=[SimpleNamespace(type="text", text=text)],
+        choices=[SimpleNamespace(message=SimpleNamespace(content=text))],
     )
 
 
@@ -38,11 +37,9 @@ def test_valid_json_response_parsed(monkeypatch):
 
     class FakeClient:
         def __init__(self, api_key):
-            self.messages = SimpleNamespace(
-                create=lambda **kw: _fake_response("end_turn", payload)
-            )
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: _fake_response("end_turn", payload)))
 
-    monkeypatch.setattr(sentiment.anthropic, "Anthropic", FakeClient)
+    monkeypatch.setattr(sentiment.groq, "Groq", FakeClient)
     verdict = sentiment.analyze_news("AAPL", [_article()], _cfg())
     assert verdict.direction == Direction.UP
     assert verdict.score == 0.6
@@ -53,11 +50,9 @@ def test_valid_json_response_parsed(monkeypatch):
 def test_refusal_returns_unavailable(monkeypatch):
     class FakeClient:
         def __init__(self, api_key):
-            self.messages = SimpleNamespace(
-                create=lambda **kw: _fake_response("refusal", "")
-            )
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: _fake_response("end_turn", "")))
 
-    monkeypatch.setattr(sentiment.anthropic, "Anthropic", FakeClient)
+    monkeypatch.setattr(sentiment.groq, "Groq", FakeClient)
     verdict = sentiment.analyze_news("AAPL", [_article()], _cfg())
     assert verdict.direction == Direction.NEUTRAL
     assert verdict.confidence == 0.0
@@ -67,11 +62,9 @@ def test_refusal_returns_unavailable(monkeypatch):
 def test_malformed_json_returns_unavailable(monkeypatch):
     class FakeClient:
         def __init__(self, api_key):
-            self.messages = SimpleNamespace(
-                create=lambda **kw: _fake_response("end_turn", "{not valid json")
-            )
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: _fake_response("end_turn", "{not valid json")))
 
-    monkeypatch.setattr(sentiment.anthropic, "Anthropic", FakeClient)
+    monkeypatch.setattr(sentiment.groq, "Groq", FakeClient)
     verdict = sentiment.analyze_news("AAPL", [_article()], _cfg())
     assert verdict.direction == Direction.NEUTRAL
     assert "NEWS_UNAVAILABLE" in verdict.rationale
