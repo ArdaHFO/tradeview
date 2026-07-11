@@ -46,8 +46,8 @@ def main() -> None:
     elif args.command == "serve":
         import uvicorn
         from forecaster.webapp import create_app
-        if not cfg.app_password:
-            logging.warning("APP_PASSWORD not set — the web UI will be unprotected!")
+        if not cfg.registration_code:
+            logging.warning("REGISTRATION_CODE not set — anyone can register an account!")
         port = int(os.environ.get("PORT", "8000"))
         uvicorn.run(create_app(cfg), host="0.0.0.0", port=port)
 

@@ -91,6 +91,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_ts TEXT NOT NULL,
     expires_ts TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 _POSTGRES_SCHEMA = """
@@ -166,7 +171,14 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_ts TEXT NOT NULL,
     expires_ts TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+_HITRATE_MIGRATION_KEY = "hitrate_v2"
 
 _DEFAULT_SETTINGS: dict[str, str] = {
     "news_weight": "0.5",
@@ -195,10 +207,40 @@ class PredictionRecorder:
             self._conn.executescript(_SQLITE_SCHEMA)
             self._conn.commit()
             self._ensure_user_columns()
+        self._ensure_hitrate_v2_migration()
 
     def _ensure_schema_postgres(self) -> None:
         for statement in (part.strip() for part in _POSTGRES_SCHEMA.split(";") if part.strip()):
             self._conn.execute(statement)
+        self._conn.commit()
+
+    def _ensure_hitrate_v2_migration(self) -> None:
+        """One-time reset of graded predictions from before the backfill/
+        threshold fix. The old logic resolved against whatever price was
+        current on the next run (often seconds later) and used a fixed
+        0.05% flat-threshold regardless of timeframe, so it graded almost
+        everything NEUTRAL. That history isn't comparable to grades from the
+        fixed logic, so clear it once rather than silently mixing the two.
+        """
+        self._use_dict_rows()
+        cur = self._execute("SELECT value FROM schema_meta WHERE key = ?", (_HITRATE_MIGRATION_KEY,))
+        if cur.fetchone() is not None:
+            return
+        self._execute(
+            "UPDATE predictions SET hit = NULL, actual_direction = NULL,"
+            " actual_next_close = NULL WHERE hit IS NOT NULL"
+        )
+        if self._backend == "postgres":
+            self._execute(
+                "INSERT INTO schema_meta (key, value) VALUES (?, ?)"
+                " ON CONFLICT (key) DO NOTHING",
+                (_HITRATE_MIGRATION_KEY, "1"),
+            )
+        else:
+            self._execute(
+                "INSERT OR IGNORE INTO schema_meta (key, value) VALUES (?, ?)",
+                (_HITRATE_MIGRATION_KEY, "1"),
+            )
         self._conn.commit()
 
     def _execute(self, query: str, params: tuple[Any, ...] = ()):
@@ -215,6 +257,11 @@ class PredictionRecorder:
             return
         self._add_column_if_missing("predictions", "user_id", "INTEGER")
         self._add_column_if_missing("comparison_runs", "user_id", "INTEGER")
+        # Older SQLite files predate the timeframe/profile/news_sources columns;
+        # a DEFAULT is required so ALTER TABLE succeeds on non-empty tables.
+        self._add_column_if_missing("predictions", "timeframe", "TEXT NOT NULL DEFAULT '1d'")
+        self._add_column_if_missing("predictions", "profile", "TEXT NOT NULL DEFAULT 'balanced'")
+        self._add_column_if_missing("predictions", "news_sources", "TEXT NOT NULL DEFAULT 'google'")
 
     def _table_columns(self, table: str) -> set[str]:
         if self._backend != "sqlite":
@@ -230,9 +277,13 @@ class PredictionRecorder:
             self._conn.commit()
 
     def _default_user_id(self) -> int:
+        # Internal placeholder used only when a caller (CLI, backfill) doesn't
+        # pass a user_id. Its password is random and never surfaced — nobody
+        # is meant to log in as it through the web UI, so "default"/"default"
+        # (guessable and previously hardcoded) must not be reachable.
         user_id = self.get_user_id("default")
         if user_id is None:
-            user_id = self.create_user("default", "default")
+            user_id = self.create_user("default", secrets.token_urlsafe(24))
         return user_id
 
     def hash_password(self, password: str, salt: str | None = None) -> tuple[str, str]:
@@ -338,8 +389,49 @@ class PredictionRecorder:
             )
         self._conn.commit()
 
+    def _find_pending_same_day(self, user_id: int, symbol: str, timeframe: str,
+                                profile: str, ts_iso: str) -> int | None:
+        """Find an already-recorded, not-yet-resolved prediction for the same
+        (user, symbol, timeframe, profile) made on the same calendar day.
+        Only pending rows are matched — once a prediction has been graded
+        it's settled history and a later same-day run is a fresh forecast,
+        not a duplicate to collapse.
+        """
+        self._use_dict_rows()
+        if self._backend == "postgres":
+            cur = self._execute(
+                "SELECT id FROM predictions WHERE user_id = ? AND symbol = ? AND timeframe = ?"
+                " AND profile = ? AND hit IS NULL AND date(ts::timestamptz) = date(?::timestamptz)",
+                (user_id, symbol, timeframe, profile, ts_iso),
+            )
+        else:
+            cur = self._execute(
+                "SELECT id FROM predictions WHERE user_id = ? AND symbol = ? AND timeframe = ?"
+                " AND profile = ? AND hit IS NULL AND date(ts) = date(?)",
+                (user_id, symbol, timeframe, profile, ts_iso),
+            )
+        row = cur.fetchone()
+        return int(row["id"]) if row else None
+
+    def _update_pending_prediction(self, prediction_id: int, p: Prediction) -> None:
+        self._execute(
+            "UPDATE predictions SET ts = ?, news_score = ?, news_confidence = ?,"
+            " news_rationale = ?, technical_score = ?, technical_reasons_json = ?,"
+            " final_score = ?, final_direction = ?, final_confidence = ?,"
+            " price_at_prediction = ? WHERE id = ?",
+            (p.ts.isoformat(), p.news_score, p.news_confidence, p.news_rationale,
+             p.technical_score, json.dumps(p.technical_reasons), p.final_score,
+             p.final_direction.value, p.final_confidence, p.price_at_prediction, prediction_id),
+        )
+        self._conn.commit()
+
     def record(self, p: Prediction, user_id: int | None = None) -> int:
         scoped_user_id = self._scope_user_id(user_id)
+        existing_id = self._find_pending_same_day(
+            scoped_user_id, p.symbol, p.timeframe, p.profile, p.ts.isoformat())
+        if existing_id is not None:
+            self._update_pending_prediction(existing_id, p)
+            return existing_id
         if self._backend == "postgres":
             cur = self._execute(
                 "INSERT INTO predictions (user_id, ts, symbol, timeframe, profile, news_sources, news_score, news_confidence, news_rationale,"
@@ -434,16 +526,22 @@ class PredictionRecorder:
         scoped_user_id = self._scope_user_id(user_id)
         self._use_dict_rows()
         cur = self._execute(
-            "SELECT ts, symbol, final_score, final_direction, final_confidence,"
-            " actual_direction, hit FROM predictions WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            "SELECT ts, symbol, timeframe, profile, final_score, final_direction,"
+            " final_confidence, actual_direction, hit FROM predictions"
+            " WHERE user_id = ? ORDER BY id DESC LIMIT ?",
             (scoped_user_id, limit),
         )
         return cur.fetchall()
 
     def _since_clause(self, days: int) -> tuple[str, tuple[Any, ...]]:
         if self._backend == "postgres":
-            return "ts >= NOW() - (%s || ' days')::interval", (days,)
-        return "ts >= datetime('now', ?)", (f"-{days} days",)
+            # ts is stored as TEXT (ISO 8601); cast explicitly so the comparison
+            # is a real timestamp comparison, not a lexical string comparison.
+            return "ts::timestamptz >= NOW() - (%s || ' days')::interval", (days,)
+        # julianday() understands the "T"-separated, timezone-suffixed ISO 8601
+        # strings we store; a raw string compare against datetime('now', ...)'s
+        # space-separated output silently misclassifies rows near the cutoff.
+        return "julianday(ts) >= julianday('now', ?)", (f"-{days} days",)
 
     def summary_by_profile(self, days: int = 30, user_id: int | None = None) -> list[sqlite3.Row]:
         scoped_user_id = self._scope_user_id(user_id)
@@ -510,14 +608,15 @@ class PredictionRecorder:
 
     def hit_rate(self, days: int, user_id: int | None = None) -> tuple[int, int]:
         scoped_user_id = self._scope_user_id(user_id)
+        self._use_dict_rows()
         since_clause, since_params = self._since_clause(days)
         cur = self._execute(
-            "SELECT COUNT(*), COALESCE(SUM(hit), 0) FROM predictions"
+            "SELECT COUNT(*) AS total, COALESCE(SUM(hit), 0) AS hits FROM predictions"
             f" WHERE user_id = ? AND hit IS NOT NULL AND {since_clause}",
             (scoped_user_id, *since_params),
         )
-        total, hits = cur.fetchone()
-        return int(hits), int(total)
+        row = cur.fetchone()
+        return int(row["hits"]), int(row["total"])
 
     def close(self) -> None:
         self._conn.close()

@@ -54,11 +54,19 @@ def _analysis_meta(item: dict) -> tuple[str, str, str]:
     )
 
 
-def _run_key(item: dict) -> str:
-    timeframe = str(item.get("timeframe", "1d"))
-    profile = str(item.get("profile", "balanced"))
+def _news_key(item: dict) -> str:
+    # News content depends only on symbol + which sources were queried, not
+    # on timeframe or profile — keying on those too (as before) meant a
+    # 3-profile "compare" run fetched and re-analyzed identical articles
+    # 3x, tripling Groq calls for no new information.
     news_sources = ",".join(item.get("news_sources") or ["google"])
-    return f"{item['symbol']}|{timeframe}|{profile}|{news_sources}"
+    return f"{item['symbol']}|{news_sources}"
+
+
+def _tech_key(item: dict) -> str:
+    # Technical score depends on symbol + timeframe, not on profile.
+    timeframe = str(item.get("timeframe", "1d"))
+    return f"{item['symbol']}|{timeframe}"
 
 
 def run_for_symbols(symbols: list[dict], cfg: Config, progress_cb=None, user_id: int | None = None) -> list[Prediction]:
@@ -75,18 +83,22 @@ def run_for_symbols(symbols: list[dict], cfg: Config, progress_cb=None, user_id:
     backfill.run(cfg, user_id=user_id)
 
     report(f"fetching news + technicals for {len(symbols)} symbol(s)...")
-    with ThreadPoolExecutor(max_workers=max(4, len(symbols) * 2)) as ex:
-        news_futures = {_run_key(item): ex.submit(_news_pipeline, item, cfg) for item in symbols}
-        tech_futures = {_run_key(item): ex.submit(_technical_pipeline, item, cfg) for item in symbols}
+    news_items = {_news_key(item): item for item in symbols}
+    tech_items = {_tech_key(item): item for item in symbols}
+    # Cap concurrency: an unbounded 2x-per-run pool risks Yahoo/Groq 429s
+    # once a compare/multi-timeframe run fans out to dozens of symbols.
+    max_workers = min(8, max(2, len(news_items) + len(tech_items)))
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        news_futures = {key: ex.submit(_news_pipeline, item, cfg) for key, item in news_items.items()}
+        tech_futures = {key: ex.submit(_technical_pipeline, item, cfg) for key, item in tech_items.items()}
 
     predictions: list[Prediction] = []
     recorder = PredictionRecorder(cfg.db_path)
     try:
         for item in symbols:
-            key = _run_key(item)
             symbol = item["symbol"]
-            news_verdict = news_futures[key].result()
-            tech_verdict, price = tech_futures[key].result()
+            news_verdict = news_futures[_news_key(item)].result()
+            tech_verdict, price = tech_futures[_tech_key(item)].result()
             if price is None:
                 log.warning("skipping %s: no technical price data", symbol)
                 continue

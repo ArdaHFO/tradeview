@@ -29,8 +29,10 @@ class Config:
         default_factory=lambda: os.environ.get("DATABASE_URL") or os.environ.get("FORECASTER_DB_PATH", "predictions.db"))
     watchlist_path: str = field(
         default_factory=lambda: os.environ.get("WATCHLIST_PATH", "watchlist.json"))
-    app_password: str = field(
-        default_factory=lambda: os.environ.get("APP_PASSWORD", ""))
+    registration_code: str = field(
+        default_factory=lambda: os.environ.get("REGISTRATION_CODE", ""))
+    cookie_secure: bool = field(
+        default_factory=lambda: os.environ.get("COOKIE_SECURE", "true").strip().lower() != "false")
 
     news_lookback_hours: int = field(
         default_factory=lambda: _env_int("NEWS_LOOKBACK_HOURS", 24))

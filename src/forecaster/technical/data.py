@@ -19,9 +19,17 @@ _TIMEFRAME_SPECS: dict[str, tuple[str, str]] = {
     "1mo": ("1mo", "10y"),
 }
 
+ALLOWED_TIMEFRAMES: tuple[str, ...] = tuple(_TIMEFRAME_SPECS.keys())
+
 
 def _resolve_timeframe(cfg: Config, timeframe: str) -> tuple[str, str]:
-    interval, default_period = _TIMEFRAME_SPECS.get(timeframe, (timeframe, cfg.technical_lookback_period))
+    spec = _TIMEFRAME_SPECS.get(timeframe)
+    if spec is None:
+        # Defense in depth: never let an unvalidated string reach yfinance as
+        # a literal interval (e.g. a stray "1d,1wk,1mo" from an old client).
+        log.warning("unknown timeframe %r, falling back to 1d", timeframe)
+        spec = _TIMEFRAME_SPECS["1d"]
+    interval, default_period = spec
     if timeframe in {"30m", "1h"}:
         return interval, cfg.intraday_lookback_period
     return interval, default_period

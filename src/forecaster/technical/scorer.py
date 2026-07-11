@@ -41,11 +41,14 @@ def score_technical(symbol: str, bars: list[Bar]) -> TechnicalVerdict:
         sign = 1.0 if closes[last] > ema20[last] else -1.0
         trend_parts.append(sign)
         reasons.append(f"price {'above' if sign > 0 else 'below'} EMA20")
-    if st_dir[last] is not None and st_line[last] is not None:
-        sign = float(st_dir[last])
-        trend_parts.append(sign)
-        reasons.append(f"Supertrend {'bullish' if sign > 0 else 'bearish'}")
     trend_score = sum(trend_parts) / len(trend_parts) if trend_parts else 0.0
+
+    # Supertrend is scored as its own 10% term below, not folded into
+    # trend_score, so it isn't counted twice.
+    supertrend_score = 0.0
+    if st_dir[last] is not None and st_line[last] is not None:
+        supertrend_score = float(st_dir[last])
+        reasons.append(f"Supertrend {'bullish' if supertrend_score > 0 else 'bearish'}")
 
     momentum_parts: list[float] = []
     if rsi14[last] is not None:
@@ -71,5 +74,5 @@ def score_technical(symbol: str, bars: list[Bar]) -> TechnicalVerdict:
 
     final = _clamp(0.40 * trend_score + 0.25 * momentum_score
                     + 0.15 * volume_score + 0.10 * position_score
-                    + 0.10 * (1.0 if st_dir[last] == 1 else (-1.0 if st_dir[last] == -1 else 0.0)))
+                    + 0.10 * supertrend_score)
     return TechnicalVerdict(symbol=symbol, score=final, reasons=reasons)

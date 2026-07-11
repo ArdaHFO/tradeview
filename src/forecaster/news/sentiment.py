@@ -34,7 +34,10 @@ _SYSTEM = (
     "direction implied by the news. score is -1.0 (strongly bearish) to 1.0 "
     "(strongly bullish). confidence is 0.0 (no signal) to 1.0 (very confident), "
     "reflecting how much the news actually bears on price, not how confident you "
-    "are in your reasoning."
+    "are in your reasoning.\n\n"
+    "Respond with a single JSON object only, no other text, matching exactly this shape:\n"
+    '{"direction": "up" | "down" | "neutral", "score": <number -1.0..1.0>, '
+    '"confidence": <number 0.0..1.0>, "key_drivers": [<string>, ...], "rationale": <string>}'
 )
 
 
@@ -79,6 +82,7 @@ def analyze_news(symbol: str, articles: list[NewsArticle], cfg: Config) -> NewsV
             model=cfg.groq_model,
             temperature=0.2,
             max_tokens=1024,
+            response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user", "content": _build_prompt(symbol, articles)},
@@ -113,12 +117,23 @@ def analyze_news(symbol: str, articles: list[NewsArticle], cfg: Config) -> NewsV
             rationale="NEWS_UNAVAILABLE (bad JSON)", article_count=len(articles),
         )
 
+    try:
+        direction = Direction(str(data["direction"]).upper())
+        score = max(-1.0, min(1.0, float(data["score"])))
+        confidence = max(0.0, min(1.0, float(data["confidence"])))
+    except (KeyError, ValueError, TypeError) as exc:
+        log.warning("groq sentiment returned an unexpected shape for %s: %r (%s)", symbol, data, exc)
+        return NewsVerdict(
+            symbol=symbol, direction=Direction.NEUTRAL, score=0.0, confidence=0.0,
+            rationale="NEWS_UNAVAILABLE (unexpected shape)", article_count=len(articles),
+        )
+
     return NewsVerdict(
         symbol=symbol,
-        direction=Direction(data["direction"].upper()),
-        score=float(data["score"]),
-        confidence=float(data["confidence"]),
-        key_drivers=list(data.get("key_drivers", [])),
-        rationale=data.get("rationale", ""),
+        direction=direction,
+        score=score,
+        confidence=confidence,
+        key_drivers=list(data.get("key_drivers", []) or []),
+        rationale=str(data.get("rationale", "")),
         article_count=len(articles),
     )

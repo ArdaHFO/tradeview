@@ -4,22 +4,39 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import re
 import secrets
 import threading
+import time
 from dataclasses import replace
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .config import Config
 from .models import Prediction
 from .pipeline import load_watchlist, run_for_symbols
 from .storage.recorder import PredictionRecorder
 from .symbols_search import search_symbols
+from .technical.data import ALLOWED_TIMEFRAMES
 
 log = logging.getLogger(__name__)
 COOKIE_NAME = "tradeview_session"
+
+
+def _parse_timeframes(raw: str | None) -> list[str]:
+    """Split a comma-separated timeframe string and drop anything not in
+    ALLOWED_TIMEFRAMES — never let a raw client string reach yfinance as an
+    interval (a single "1d,1wk,1mo" string is not a valid yfinance interval).
+    """
+    if not raw:
+        return ["1d"]
+    valid = [tf.strip() for tf in raw.split(",") if tf.strip() in ALLOWED_TIMEFRAMES]
+    # dedupe while preserving order
+    seen: set[str] = set()
+    out = [tf for tf in valid if not (tf in seen or seen.add(tf))]
+    return out or ["1d"]
 
 
 class SymbolIn(BaseModel):
@@ -37,6 +54,34 @@ class AnalyzeRequest(BaseModel):
 class AuthRequest(BaseModel):
     username: str
     password: str
+    invite_code: str | None = None
+
+
+class _RateLimiter:
+    """In-memory sliding-window limiter keyed by client IP.
+
+    Single-process only, consistent with this app's other in-memory state
+    (AnalysisState/RuntimeState caches) — see the multi-worker note in
+    create_app.
+    """
+
+    def __init__(self, max_attempts: int, window_seconds: float) -> None:
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self._attempts: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            attempts = [t for t in self._attempts.get(key, []) if now - t < self.window_seconds]
+            attempts.append(now)
+            self._attempts[key] = attempts
+            return len(attempts) <= self.max_attempts
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
 
 
 class WatchlistItemIn(BaseModel):
@@ -49,16 +94,30 @@ class WatchlistItemIn(BaseModel):
     profiles: str = "balanced"
 
 
+_PERIOD_RE = re.compile(r"^(\d+(d|mo|y)|ytd|max)$")
+
+
 class AppSettingsIn(BaseModel):
     news_weight: float | None = Field(default=None, ge=0.0, le=1.0)
     technical_weight: float | None = Field(default=None, ge=0.0, le=1.0)
     neutral_band: float | None = Field(default=None, ge=0.0, le=1.0)
-    groq_model: str | None = None
+    groq_model: str | None = Field(default=None, min_length=1)
     news_lookback_hours: int | None = Field(default=None, ge=1, le=168)
     max_articles_per_symbol: int | None = Field(default=None, ge=1, le=50)
     max_symbols_per_run: int | None = Field(default=None, ge=1, le=100)
     intraday_lookback_period: str | None = None
     technical_lookback_period: str | None = None
+
+    @field_validator("intraday_lookback_period", "technical_lookback_period")
+    @classmethod
+    def _validate_period(cls, value: str | None) -> str | None:
+        # These feed straight into yfinance's `period=` argument — an
+        # unvalidated string here is the same class of bug as the timeframe
+        # string that used to reach the `interval=` argument unvalidated.
+        if value is not None and not _PERIOD_RE.match(value):
+            raise ValueError(
+                "period must look like '60d', '6mo', '5y', 'ytd', or 'max'")
+        return value
 
 
 _SETTING_TYPES: dict[str, type] = {
@@ -171,6 +230,9 @@ def create_app(cfg: Config) -> FastAPI:
     app = FastAPI(title="Haber + Teknik Analiz Tahmin Sistemi")
     runtime_cache: dict[int, RuntimeState] = {}
     state_cache: dict[int, AnalysisState] = {}
+    # 8 attempts / 5 minutes per IP on register+login combined — generous
+    # enough for typo-driven retries, tight enough to blunt brute force.
+    auth_limiter = _RateLimiter(max_attempts=8, window_seconds=300)
 
     def _recorder() -> PredictionRecorder:
         return PredictionRecorder(cfg.db_path)
@@ -215,10 +277,15 @@ def create_app(cfg: Config) -> FastAPI:
         return JSONResponse({"status": "ok"})
 
     @app.post("/api/register")
-    def api_register(item: AuthRequest, response: Response) -> JSONResponse:
+    def api_register(item: AuthRequest, request: Request, response: Response) -> JSONResponse:
+        if not auth_limiter.allow(_client_ip(request)):
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                                 detail="Too many attempts, try again later")
         username = item.username.strip().lower()
         if not username or not item.password:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username and password are required")
+        if cfg.registration_code and item.invite_code != cfg.registration_code:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid registration code")
         recorder = _recorder()
         try:
             if recorder.get_user(username) is not None:
@@ -228,11 +295,15 @@ def create_app(cfg: Config) -> FastAPI:
         finally:
             recorder.close()
         response = JSONResponse({"ok": True, "username": username})
-        response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7)
+        response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax",
+                             secure=cfg.cookie_secure, max_age=60 * 60 * 24 * 7)
         return response
 
     @app.post("/api/login")
-    def api_login(item: AuthRequest) -> JSONResponse:
+    def api_login(item: AuthRequest, request: Request) -> JSONResponse:
+        if not auth_limiter.allow(_client_ip(request)):
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                                 detail="Too many attempts, try again later")
         username = item.username.strip().lower()
         recorder = _recorder()
         try:
@@ -243,7 +314,8 @@ def create_app(cfg: Config) -> FastAPI:
         finally:
             recorder.close()
         response = JSONResponse({"ok": True, "username": username})
-        response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7)
+        response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax",
+                             secure=cfg.cookie_secure, max_age=60 * 60 * 24 * 7)
         return response
 
     @app.post("/api/logout")
@@ -276,13 +348,11 @@ def create_app(cfg: Config) -> FastAPI:
         return JSONResponse(search_symbols(q))
 
     @app.get("/api/settings")
-    def api_settings(request: Request, _: int = Depends(require_user)) -> JSONResponse:
-        user_id = require_user(request)
+    def api_settings(user_id: int = Depends(require_user)) -> JSONResponse:
         return JSONResponse(_get_runtime(user_id).snapshot())
 
     @app.put("/api/settings")
-    def api_settings_update(item: AppSettingsIn, request: Request, _: int = Depends(require_user)) -> JSONResponse:
-        user_id = require_user(request)
+    def api_settings_update(item: AppSettingsIn, user_id: int = Depends(require_user)) -> JSONResponse:
         updates = item.model_dump(exclude_none=True)
         if not updates:
             return JSONResponse(_get_runtime(user_id).snapshot())
@@ -301,8 +371,7 @@ def create_app(cfg: Config) -> FastAPI:
             return JSONResponse([])
 
     @app.get("/api/watchlist")
-    def api_watchlist(request: Request, _: int = Depends(require_user)) -> JSONResponse:
-        user_id = require_user(request)
+    def api_watchlist(user_id: int = Depends(require_user)) -> JSONResponse:
         recorder = _recorder()
         try:
             return JSONResponse([dict(row) for row in recorder.list_watchlist(user_id=user_id)])
@@ -310,8 +379,7 @@ def create_app(cfg: Config) -> FastAPI:
             recorder.close()
 
     @app.post("/api/watchlist")
-    def api_watchlist_upsert(item: WatchlistItemIn, request: Request, _: int = Depends(require_user)) -> JSONResponse:
-        user_id = require_user(request)
+    def api_watchlist_upsert(item: WatchlistItemIn, user_id: int = Depends(require_user)) -> JSONResponse:
         recorder = _recorder()
         try:
             recorder.upsert_watchlist(
@@ -323,27 +391,7 @@ def create_app(cfg: Config) -> FastAPI:
             recorder.close()
 
     @app.post("/api/analyze")
-    def api_analyze(req: AnalyzeRequest, request: Request, _: int = Depends(require_user)) -> JSONResponse:
-        user_id = require_user(request)
-        current_cfg = _get_runtime(user_id).current_cfg()
-        if len(req.symbols) > current_cfg.max_symbols_per_run:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"En fazla {current_cfg.max_symbols_per_run} sembol seçebilirsiniz.",
-            )
-        symbols = [{
-            "symbol": s.symbol,
-            "name": s.name,
-            "timeframe": s.timeframe or "1d",
-            "profile": s.profile or "balanced",
-            "news_sources": s.news_sources or ["google"],
-        } for s in req.symbols]
-        started = _get_state(user_id).start_analysis(symbols, user_id=user_id)
-        return JSONResponse({"started": started})
-
-    @app.post("/api/analyze/multi")
-    def api_analyze_multi(req: AnalyzeRequest, request: Request, _: int = Depends(require_user)) -> JSONResponse:
-        user_id = require_user(request)
+    def api_analyze(req: AnalyzeRequest, user_id: int = Depends(require_user)) -> JSONResponse:
         current_cfg = _get_runtime(user_id).current_cfg()
         if len(req.symbols) > current_cfg.max_symbols_per_run:
             raise HTTPException(
@@ -359,14 +407,35 @@ def create_app(cfg: Config) -> FastAPI:
                 "news_sources": s.news_sources or ["google"],
             }
             for s in req.symbols
-            for timeframe in (s.timeframe.split(",") if s.timeframe else ["1d"])
+            for timeframe in _parse_timeframes(s.timeframe)
+        ]
+        started = _get_state(user_id).start_analysis(symbols, user_id=user_id)
+        return JSONResponse({"started": started, "runs": len(symbols)})
+
+    @app.post("/api/analyze/multi")
+    def api_analyze_multi(req: AnalyzeRequest, user_id: int = Depends(require_user)) -> JSONResponse:
+        current_cfg = _get_runtime(user_id).current_cfg()
+        if len(req.symbols) > current_cfg.max_symbols_per_run:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"En fazla {current_cfg.max_symbols_per_run} sembol seçebilirsiniz.",
+            )
+        symbols = [
+            {
+                "symbol": s.symbol,
+                "name": s.name,
+                "timeframe": timeframe,
+                "profile": s.profile or "balanced",
+                "news_sources": s.news_sources or ["google"],
+            }
+            for s in req.symbols
+            for timeframe in _parse_timeframes(s.timeframe)
         ]
         started = _get_state(user_id).start_analysis(symbols, user_id=user_id)
         return JSONResponse({"started": started, "runs": len(symbols)})
 
     @app.post("/api/analyze/compare")
-    def api_analyze_compare(req: AnalyzeRequest, request: Request, _: int = Depends(require_user)) -> JSONResponse:
-        user_id = require_user(request)
+    def api_analyze_compare(req: AnalyzeRequest, user_id: int = Depends(require_user)) -> JSONResponse:
         current_cfg = _get_runtime(user_id).current_cfg()
         if len(req.symbols) > current_cfg.max_symbols_per_run:
             raise HTTPException(
@@ -378,19 +447,19 @@ def create_app(cfg: Config) -> FastAPI:
             {
                 "symbol": s.symbol,
                 "name": s.name,
-                "timeframe": s.timeframe or "1d",
+                "timeframe": timeframe,
                 "profile": profile,
                 "news_sources": s.news_sources or ["google"],
             }
             for s in req.symbols
+            for timeframe in _parse_timeframes(s.timeframe)
             for profile in profiles
         ]
         started = _get_state(user_id).start_analysis(symbols, user_id=user_id)
         return JSONResponse({"started": started, "comparisons": len(symbols)})
 
     @app.get("/api/state")
-    def api_state(request: Request, _: int = Depends(require_user)) -> JSONResponse:
-        user_id = require_user(request)
+    def api_state(user_id: int = Depends(require_user)) -> JSONResponse:
         state = _get_state(user_id)
         with state.lock:
             return JSONResponse({
@@ -401,8 +470,7 @@ def create_app(cfg: Config) -> FastAPI:
             })
 
     @app.get("/api/dashboard")
-    def api_dashboard(request: Request, days: int = 30, _: int = Depends(require_user)) -> JSONResponse:
-        user_id = require_user(request)
+    def api_dashboard(days: int = 30, user_id: int = Depends(require_user)) -> JSONResponse:
         recorder = _recorder()
         try:
             watchlist = [dict(row) for row in recorder.list_watchlist(user_id=user_id)]
@@ -416,12 +484,17 @@ def create_app(cfg: Config) -> FastAPI:
         finally:
             recorder.close()
 
+        # Only resolved predictions belong in a running hit-rate — a pending
+        # row (hit IS NULL) is not yet a miss, and counting it as one (via
+        # `1 if row.get("hit") else 0`, which is also 0 for None) understated
+        # the rate for every symbol with an in-flight prediction.
+        resolved = [row for row in recent if row.get("hit") is not None]
         hit_series = []
         running_hits = 0
         running_total = 0
-        for row in reversed(recent):
+        for row in reversed(resolved):
             running_total += 1
-            running_hits += 1 if row.get("hit") else 0
+            running_hits += 1 if row["hit"] else 0
             hit_series.append({
                 "ts": row["ts"],
                 "symbol": row["symbol"],
@@ -442,8 +515,7 @@ def create_app(cfg: Config) -> FastAPI:
         })
 
     @app.get("/api/history")
-    def api_history(request: Request, days: int = 7, _: int = Depends(require_user)) -> JSONResponse:
-        user_id = require_user(request)
+    def api_history(days: int = 7, user_id: int = Depends(require_user)) -> JSONResponse:
         recorder = _recorder()
         try:
             rows = recorder.recent(limit=50, user_id=user_id)
@@ -456,8 +528,7 @@ def create_app(cfg: Config) -> FastAPI:
         })
 
     @app.get("/api/history.csv")
-    def api_history_csv(request: Request, _: int = Depends(require_user)) -> PlainTextResponse:
-        user_id = require_user(request)
+    def api_history_csv(user_id: int = Depends(require_user)) -> PlainTextResponse:
         recorder = _recorder()
         try:
             rows = recorder.recent(limit=500, user_id=user_id)
@@ -465,11 +536,11 @@ def create_app(cfg: Config) -> FastAPI:
             recorder.close()
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(["ts", "symbol", "final_score", "final_direction",
+        writer.writerow(["ts", "symbol", "timeframe", "profile", "final_score", "final_direction",
                           "final_confidence", "actual_direction", "hit"])
         for r in rows:
-            writer.writerow([r["ts"], r["symbol"], r["final_score"], r["final_direction"],
-                             r["final_confidence"], r["actual_direction"], r["hit"]])
+            writer.writerow([r["ts"], r["symbol"], r["timeframe"], r["profile"], r["final_score"],
+                             r["final_direction"], r["final_confidence"], r["actual_direction"], r["hit"]])
         return PlainTextResponse(
             buf.getvalue(), media_type="text/csv",
             headers={"Content-Disposition": "attachment; filename=predictions.csv"},
@@ -529,7 +600,7 @@ canvas{width:100%!important;height:320px!important}
       <h1>TradeView</h1>
       <div class="sub">Haber + teknik analiz, Groq destekli yorumlama, watchlist yönetimi ve performans dashboard'u.</div>
     </div>
-    <div class="badge"><span class="pill">Groq: llama-3.3-70b-versatile</span><span id="status" class="pill">idle</span></div>
+    <div class="badge"><span id="modelBadge" class="pill">Groq: —</span><span id="status" class="pill">idle</span></div>
   </div>
 
     <div class="card panel" id="authCard">
@@ -563,6 +634,35 @@ canvas{width:100%!important;height:320px!important}
       </div>
       <input type="text" id="q" placeholder="AAPL, Apple, MSFT..." autocomplete="off">
       <div id="dd" class="dropdown" style="display:none"></div>
+      <div class="row" style="margin-top:12px;gap:16px;flex-wrap:wrap">
+        <div class="field" style="min-width:180px">
+          <label>Zaman dilimi (yeni eklenecek semboller için)</label>
+          <div class="row" id="tf_controls">
+            <label><input type="checkbox" class="tf_cb" value="1d" checked> 1d</label>
+            <label><input type="checkbox" class="tf_cb" value="1h"> 1h</label>
+            <label><input type="checkbox" class="tf_cb" value="30m"> 30m</label>
+            <label><input type="checkbox" class="tf_cb" value="1wk"> 1wk</label>
+            <label><input type="checkbox" class="tf_cb" value="1mo"> 1mo</label>
+          </div>
+        </div>
+        <div class="field" style="min-width:160px">
+          <label>Profil</label>
+          <select id="profile_control">
+            <option value="balanced">balanced</option>
+            <option value="news_heavy">news_heavy</option>
+            <option value="technical_heavy">technical_heavy</option>
+            <option value="news_only">news_only</option>
+            <option value="technical_only">technical_only</option>
+          </select>
+        </div>
+        <div class="field" style="min-width:140px">
+          <label>Haber kaynağı</label>
+          <div class="row" id="src_controls">
+            <label><input type="checkbox" class="src_cb" value="google" checked> Google</label>
+            <label><input type="checkbox" class="src_cb" value="yahoo"> Yahoo</label>
+          </div>
+        </div>
+      </div>
       <div class="row" style="margin-top:12px;justify-content:space-between">
         <div class="chips" id="chips"></div>
         <div class="row">
@@ -621,35 +721,86 @@ let barChart = null;
 let appSettings = {};
 
 function dirClass(d){ return d==='UP' ? 'up' : (d==='DOWN' ? 'down' : 'neutral'); }
+function esc(s){
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function errDetail(err){
+  const d = err && err.detail;
+  if (!d) return null;
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d)) return d.map(e => e.msg || JSON.stringify(e)).join('; ');
+  return JSON.stringify(d);
+}
 function pct(hit, total){ return total ? Math.round(100 * hit / total) + '%' : '0%'; }
 
 const qEl = document.getElementById('q');
-qEl.addEventListener('input', async () => {
+let searchDebounce = null;
+let lastSearchResults = [];
+
+async function runSearch(){
   const q = qEl.value.trim();
   const dd = document.getElementById('dd');
-  if (q.length < 2) { dd.style.display = 'none'; return; }
+  if (q.length < 2) { dd.style.display = 'none'; lastSearchResults = []; return; }
   const r = await fetch('/api/symbols?q=' + encodeURIComponent(q));
   const items = await r.json();
+  lastSearchResults = items;
   if (!items.length) { dd.style.display = 'none'; return; }
-  dd.innerHTML = items.map(it => `<div onclick='pick(${JSON.stringify(it).replace(/'/g,"&#39;")})'><b>${it.symbol}</b> — ${it.name}</div>`).join('');
+  dd.innerHTML = items.map(it => `<div onclick='pick(${JSON.stringify(it).replace(/'/g,"&#39;")})'><b>${esc(it.symbol)}</b> — ${esc(it.name)}</div>`).join('');
   dd.style.display = 'block';
+}
+
+qEl.addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(runSearch, 300);
 });
 
+qEl.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && lastSearchResults.length){
+    ev.preventDefault();
+    pick(lastSearchResults[0]);
+  } else if (ev.key === 'Escape'){
+    document.getElementById('dd').style.display = 'none';
+  }
+});
+
+document.addEventListener('click', (ev) => {
+  const dd = document.getElementById('dd');
+  if (ev.target !== qEl && !dd.contains(ev.target)) dd.style.display = 'none';
+});
+
+function checkedValues(selector){
+  return [...document.querySelectorAll(selector + ':checked')].map(el => el.value);
+}
+function controlTimeframes(){ return checkedValues('.tf_cb').join(',') || '1d'; }
+function controlSources(){ return checkedValues('.src_cb'); }
+function controlProfile(){ return document.getElementById('profile_control').value || 'balanced'; }
+
 function pick(item){
-  if (!selected.some(s => s.symbol === item.symbol)) selected.push({...item, timeframe:'1d,1wk,1mo', profile:'balanced', news_sources:['google']});
+  if (!selected.some(s => s.symbol === item.symbol)) {
+    selected.push({
+      ...item,
+      timeframe: controlTimeframes(),
+      profile: controlProfile(),
+      news_sources: controlSources().length ? controlSources() : ['google'],
+    });
+  }
   qEl.value = '';
   document.getElementById('dd').style.display = 'none';
   renderChips();
 }
 
 function remove(symbol){ selected = selected.filter(s => s.symbol !== symbol); renderChips(); }
-function renderChips(){ document.getElementById('chips').innerHTML = selected.map(s => `<span class="chip">${s.symbol}<button onclick="remove('${s.symbol}')">×</button></span>`).join(''); }
+function renderChips(){
+  document.getElementById('chips').innerHTML = selected.map(s =>
+    `<span class="chip" title="${esc(s.timeframe)} / ${esc(s.profile)} / ${esc((s.news_sources||[]).join(','))}">${esc(s.symbol)}
+      <button onclick="remove('${esc(s.symbol)}')">×</button></span>`).join('');
+}
 
 async function postAnalyze(url, payload){
   const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
   if (!r.ok){
     const err = await r.json().catch(() => ({}));
-    alert(err.detail || 'İşlem başlatılamadı.');
+    alert(errDetail(err) || 'İşlem başlatılamadı.');
     return false;
   }
   const data = await r.json();
@@ -700,6 +851,7 @@ function applySettingsToForm(settings){
         const input = document.getElementById(`set_${key}`);
         if (input) input.value = value;
     }
+    document.getElementById('modelBadge').textContent = 'Groq: ' + esc(settings.groq_model || '—');
 }
 
 async function loadSettings(){
@@ -731,7 +883,7 @@ async function saveSettings(){
     });
     if (!r.ok){
         const err = await r.json().catch(() => ({}));
-        document.getElementById('settings_status').textContent = err.detail || 'Ayarlar kaydedilemedi.';
+        document.getElementById('settings_status').textContent = errDetail(err) || 'Ayarlar kaydedilemedi.';
         return;
     }
     const saved = await r.json();
@@ -754,29 +906,30 @@ async function refreshState(){
   const results = document.getElementById('results');
   if (s.results.length){
     results.innerHTML = s.results.map(p => `<tr>
-      <td><b>${p.symbol}</b></td>
-      <td>${p.timeframe}</td>
-      <td>${p.profile}</td>
-      <td class="${dirClass(p.final_direction)}">${p.final_direction}</td>
+      <td><b>${esc(p.symbol)}</b></td>
+      <td>${esc(p.timeframe)}</td>
+      <td>${esc(p.profile)}</td>
+      <td class="${dirClass(p.final_direction)}">${esc(p.final_direction)}</td>
       <td>${p.final_score.toFixed(2)}</td>
       <td>${p.final_confidence.toFixed(2)}</td>
       <td>${p.news_score.toFixed(2)} (${p.news_confidence.toFixed(2)})</td>
       <td>${p.technical_score.toFixed(2)}</td>
-      <td class="reasons">${p.news_rationale}<br>${p.technical_reasons.join('; ')}</td>
+      <td class="reasons">${esc(p.news_rationale)}<br>${esc(p.technical_reasons.join('; '))}</td>
       </tr>`).join('');
   }
   if (s.status !== 'running' && pollTimer){ clearInterval(pollTimer); pollTimer = null; loadHistory(); loadDashboard(); }
 }
 
 async function loadHistory(){
+  // statHit ("Son 30 gün hit rate") is exclusively loadDashboard's job —
+  // this used to also set it from a 7-day window under the same label,
+  // and whichever of the two async calls finished last silently won.
   const r = await fetch('/api/history?days=7');
   const s = await r.json();
-  const hr = s.hit_rate;
-  document.getElementById('statHit').textContent = pct(hr.hits, hr.total);
   document.getElementById('history').innerHTML = s.recent.length ? s.recent.map(p => `<tr>
     <td>${new Date(p.ts).toLocaleString()}</td>
-    <td><b>${p.symbol}</b></td>
-    <td class="${dirClass(p.final_direction)}">${p.final_direction}</td>
+    <td><b>${esc(p.symbol)}</b></td>
+    <td class="${dirClass(p.final_direction)}">${esc(p.final_direction)}</td>
     <td>${p.hit === null ? '—' : (p.hit ? '✅' : '❌')}</td>
     </tr>`).join('') : '<tr><td colspan="4" class="empty">Henüz tahmin yok</td></tr>';
 }
@@ -797,23 +950,26 @@ async function loadDashboard(){
     options:{ responsive:true, plugins:{ legend:{display:false} }, scales:{ y:{ beginAtZero:true, max:100, grid:{ color:'rgba(255,255,255,.06)' } }, x:{ grid:{ display:false } } } }
   });
 
-  const profileMap = new Map((d.by_profile || []).map(x => [x.profile, x.hits]));
-  const timeframeMap = new Map((d.by_timeframe || []).map(x => [x.timeframe, x.hits]));
+  // Hit *rate* (%), not raw hit *count* — a profile run 40 times isn't
+  // "better" than one run 5 times just because it has more hits.
+  const rate = (x) => x.total > 0 ? Math.round(100 * x.hits / x.total) : 0;
+  const profileMap = new Map((d.by_profile || []).map(x => [x.profile, rate(x)]));
+  const timeframeMap = new Map((d.by_timeframe || []).map(x => [x.timeframe, rate(x)]));
   const labels = [...new Set([...profileMap.keys(), ...timeframeMap.keys()])].filter(Boolean);
   barChart = chartOrUpdate(barChart, document.getElementById('barChart'), {
     type:'bar',
-    data:{ labels, datasets:[{label:'Profile hits', data:labels.map(l => profileMap.get(l) || 0), backgroundColor:'#31c48d'}, {label:'Timeframe hits', data:labels.map(l => timeframeMap.get(l) || 0), backgroundColor:'#6ca7ff'}] },
-    options:{ responsive:true, plugins:{ legend:{ labels:{ color:'#e7eefb' } } }, scales:{ y:{ beginAtZero:true, grid:{ color:'rgba(255,255,255,.06)' } }, x:{ grid:{ display:false } } } }
+    data:{
+      labels,
+      datasets:[
+        {label:'Profil isabet %', data:labels.map(l => profileMap.has(l) ? profileMap.get(l) : null), backgroundColor:'#31c48d'},
+        {label:'Zaman dilimi isabet %', data:labels.map(l => timeframeMap.has(l) ? timeframeMap.get(l) : null), backgroundColor:'#6ca7ff'},
+      ],
+    },
+    options:{ responsive:true, plugins:{ legend:{ labels:{ color:'#e7eefb' } } },
+      scales:{ y:{ beginAtZero:true, max:100, grid:{ color:'rgba(255,255,255,.06)' } }, x:{ grid:{ display:false } } } }
   });
 
-    document.getElementById('watchlist').innerHTML = d.watchlist.length ? d.watchlist.map(w => `<tr><td><b>${w.symbol}</b></td><td>${w.name || ''}</td><td>${w.profiles || ''} / ${w.timeframes || ''}</td><td class="muted">${w.sources || ''} <button class="btn alt" style="padding:6px 10px;margin-left:8px" onclick='editWatchlist(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Seç</button></td></tr>`).join('') : '<tr><td colspan="4" class="empty">Watchlist boş</td></tr>';
-}
-
-async function loadWatchlist(){
-  const r = await fetch('/api/watchlist');
-  const items = await r.json();
-  if (!items.length) return;
-    document.getElementById('watchlist').innerHTML = items.map(w => `<tr><td><b>${w.symbol}</b></td><td>${w.name || ''}</td><td>${w.profiles || ''} / ${w.timeframes || ''}</td><td class="muted">${w.sources || ''} <button class="btn alt" style="padding:6px 10px;margin-left:8px" onclick='editWatchlist(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Seç</button></td></tr>`).join('');
+    document.getElementById('watchlist').innerHTML = d.watchlist.length ? d.watchlist.map(w => `<tr><td><b>${esc(w.symbol)}</b></td><td>${esc(w.name || '')}</td><td>${esc(w.profiles || '')} / ${esc(w.timeframes || '')}</td><td class="muted">${esc(w.sources || '')} <button class="btn alt" style="padding:6px 10px;margin-left:8px" onclick='editWatchlist(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Seç</button></td></tr>`).join('') : '<tr><td colspan="4" class="empty">Watchlist boş</td></tr>';
 }
 
 async function loginUser(){
@@ -821,7 +977,7 @@ async function loginUser(){
     const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
     if (!r.ok){
         const err = await r.json().catch(() => ({}));
-        document.getElementById('auth_status').textContent = err.detail || 'Giriş başarısız.';
+        document.getElementById('auth_status').textContent = errDetail(err) || 'Giriş başarısız.';
         return;
     }
     document.getElementById('auth_status').textContent = 'Giriş başarılı.';
@@ -833,7 +989,7 @@ async function registerUser(){
     const r = await fetch('/api/register', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
     if (!r.ok){
         const err = await r.json().catch(() => ({}));
-        document.getElementById('auth_status').textContent = err.detail || 'Kayıt başarısız.';
+        document.getElementById('auth_status').textContent = errDetail(err) || 'Kayıt başarısız.';
         return;
     }
     document.getElementById('auth_status').textContent = 'Hesap oluşturuldu.';
@@ -845,6 +1001,7 @@ async function logoutUser(){
     selected = [];
     renderChips();
     document.getElementById('app_shell').style.display = 'none';
+    document.getElementById('authCard').style.display = 'block';
     document.getElementById('meStatus').textContent = 'oturum yok';
     document.getElementById('auth_status').textContent = 'Çıkış yapıldı.';
 }
@@ -858,14 +1015,15 @@ async function loadMe(){
 async function initializeForSession(){
     const me = await loadMe();
     if (!me){
+        document.getElementById('authCard').style.display = 'block';
         document.getElementById('app_shell').style.display = 'none';
         document.getElementById('meStatus').textContent = 'oturum yok';
         return;
     }
     document.getElementById('meStatus').textContent = `giriş: ${me.username}`;
+    document.getElementById('authCard').style.display = 'none';
     document.getElementById('app_shell').style.display = 'block';
     await loadSettings();
-    await loadWatchlist();
     await loadHistory();
     await loadDashboard();
 }

@@ -30,8 +30,17 @@ def _is_duplicate(title: str, seen: list[str], threshold: float) -> bool:
     return False
 
 
+def _effective_lookback_hours(cfg: Config) -> int:
+    """Bridge the Monday news gap: a fixed lookback misses Fri-evening/weekend
+    news when a run happens Monday morning, since markets (and most news
+    cadence) were quiet Sat/Sun.
+    """
+    if datetime.now(timezone.utc).weekday() == 0:  # Monday
+        return max(cfg.news_lookback_hours, 72)
+    return cfg.news_lookback_hours
+
+
 def _parse_feed(feed, source_label: str, cfg: Config, cutoff: datetime, seen_titles: list[str]) -> list[NewsArticle]:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=cfg.news_lookback_hours)
     articles: list[NewsArticle] = []
 
     for entry in feed.entries:
@@ -66,7 +75,7 @@ def _fetch_google_articles(symbol: str, company_name: str | None, cfg: Config,
     except Exception as exc:
         log.warning("google news fetch failed for %s: %s", symbol, exc)
         return []
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=cfg.news_lookback_hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_effective_lookback_hours(cfg))
     return _parse_feed(feed, "Google News", cfg, cutoff, seen_titles)
 
 
@@ -79,7 +88,7 @@ def _fetch_yahoo_articles(symbol: str, cfg: Config, seen_titles: list[str]) -> l
     except Exception as exc:
         log.warning("yahoo news fetch failed for %s: %s", symbol, exc)
         return []
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=cfg.news_lookback_hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=_effective_lookback_hours(cfg))
     return _parse_feed(feed, "Yahoo Finance", cfg, cutoff, seen_titles)
 
 
@@ -110,8 +119,7 @@ def fetch_articles(symbol: str, company_name: str | None, cfg: Config,
             articles.extend(_fetch_yahoo_articles(symbol, cfg, seen_titles))
 
     articles.sort(key=lambda article: article.published_ts, reverse=True)
-    return articles[:cfg.max_articles_per_symbol]
-
+    articles = articles[:cfg.max_articles_per_symbol]
     log.info("news fetch: %s -> %d articles", symbol, len(articles))
     return articles
 
