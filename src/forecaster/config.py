@@ -26,7 +26,7 @@ class Config:
     groq_api_key: str = field(
         default_factory=lambda: os.environ.get("GROQ_API_KEY", ""))
     db_path: str = field(
-        default_factory=lambda: os.environ.get("FORECASTER_DB_PATH", "predictions.db"))
+        default_factory=lambda: os.environ.get("DATABASE_URL") or os.environ.get("FORECASTER_DB_PATH", "predictions.db"))
     watchlist_path: str = field(
         default_factory=lambda: os.environ.get("WATCHLIST_PATH", "watchlist.json"))
     app_password: str = field(

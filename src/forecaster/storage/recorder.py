@@ -1,16 +1,24 @@
 """Persist every prediction to SQLite for later accuracy tracking."""
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import sqlite3
 import secrets
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from typing import Any
+
+try:
+    import psycopg  # type: ignore[import-not-found]
+    from psycopg.rows import dict_row  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - optional dependency for Supabase/Postgres deployments
+    psycopg = None
+    dict_row = None
 
 from ..models import Direction, Prediction
 
-_SCHEMA = """
+_SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS predictions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -85,6 +93,81 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 """
 
+_POSTGRES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS predictions (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT,
+    ts TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    news_sources TEXT NOT NULL,
+    news_score DOUBLE PRECISION NOT NULL,
+    news_confidence DOUBLE PRECISION NOT NULL,
+    news_rationale TEXT NOT NULL,
+    technical_score DOUBLE PRECISION NOT NULL,
+    technical_reasons_json TEXT NOT NULL,
+    final_score DOUBLE PRECISION NOT NULL,
+    final_direction TEXT NOT NULL,
+    final_confidence DOUBLE PRECISION NOT NULL,
+    price_at_prediction DOUBLE PRECISION NOT NULL,
+    actual_next_close DOUBLE PRECISION,
+    actual_direction TEXT,
+    hit INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_predictions_symbol_ts ON predictions(user_id, symbol, ts);
+
+CREATE TABLE IF NOT EXISTS user_watchlist (
+    user_id BIGINT NOT NULL,
+    symbol TEXT NOT NULL,
+    name TEXT,
+    sector TEXT,
+    notes TEXT,
+    sources TEXT DEFAULT 'google',
+    timeframes TEXT DEFAULT '1d',
+    profiles TEXT DEFAULT 'balanced',
+    PRIMARY KEY (user_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS comparison_runs (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT,
+    ts TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    news_score DOUBLE PRECISION NOT NULL,
+    technical_score DOUBLE PRECISION NOT NULL,
+    final_score DOUBLE PRECISION NOT NULL,
+    final_direction TEXT NOT NULL,
+    final_confidence DOUBLE PRECISION NOT NULL,
+    news_sources TEXT NOT NULL,
+    hit INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS user_app_settings (
+    user_id BIGINT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (user_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id BIGSERIAL PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    created_ts TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    created_ts TEXT NOT NULL,
+    expires_ts TEXT NOT NULL
+);
+"""
+
 _DEFAULT_SETTINGS: dict[str, str] = {
     "news_weight": "0.5",
     "technical_weight": "0.5",
@@ -100,20 +183,48 @@ _DEFAULT_SETTINGS: dict[str, str] = {
 
 class PredictionRecorder:
     def __init__(self, db_path: str | Path) -> None:
-        self._conn = sqlite3.connect(str(db_path))
-        self._conn.executescript(_SCHEMA)
+        self._dsn = str(db_path)
+        self._backend = "postgres" if self._dsn.startswith(("postgres://", "postgresql://")) else "sqlite"
+        if self._backend == "postgres":
+            if psycopg is None or dict_row is None:
+                raise RuntimeError("psycopg is required when DATABASE_URL points to Postgres/Supabase")
+            self._conn = psycopg.connect(self._dsn, row_factory=dict_row)
+            self._ensure_schema_postgres()
+        else:
+            self._conn = sqlite3.connect(self._dsn)
+            self._conn.executescript(_SQLITE_SCHEMA)
+            self._conn.commit()
+            self._ensure_user_columns()
+
+    def _ensure_schema_postgres(self) -> None:
+        for statement in (part.strip() for part in _POSTGRES_SCHEMA.split(";") if part.strip()):
+            self._conn.execute(statement)
         self._conn.commit()
-        self._ensure_user_columns()
+
+    def _execute(self, query: str, params: tuple[Any, ...] = ()):
+        if self._backend == "postgres":
+            query = query.replace("?", "%s")
+        return self._conn.execute(query, params)
+
+    def _use_dict_rows(self) -> None:
+        if self._backend == "sqlite":
+            self._conn.row_factory = sqlite3.Row
 
     def _ensure_user_columns(self) -> None:
+        if self._backend != "sqlite":
+            return
         self._add_column_if_missing("predictions", "user_id", "INTEGER")
         self._add_column_if_missing("comparison_runs", "user_id", "INTEGER")
 
     def _table_columns(self, table: str) -> set[str]:
+        if self._backend != "sqlite":
+            return set()
         cur = self._conn.execute(f"PRAGMA table_info({table})")
         return {str(row[1]) for row in cur.fetchall()}
 
     def _add_column_if_missing(self, table: str, column: str, definition: str) -> None:
+        if self._backend != "sqlite":
+            return
         if column not in self._table_columns(table):
             self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             self._conn.commit()
@@ -135,25 +246,33 @@ class PredictionRecorder:
 
     def create_user(self, username: str, password: str) -> int:
         password_hash, password_salt = self.hash_password(password)
-        cur = self._conn.execute(
+        if self._backend == "postgres":
+            cur = self._execute(
+                "INSERT INTO users (username, password_hash, password_salt, created_ts) VALUES (?, ?, ?, ?) RETURNING id",
+                (username.strip().lower(), password_hash, password_salt, datetime.now(timezone.utc).isoformat()),
+            )
+            row = cur.fetchone()
+            self._conn.commit()
+            return int(row["id"])
+        cur = self._execute(
             "INSERT INTO users (username, password_hash, password_salt, created_ts) VALUES (?, ?, ?, ?)",
             (username.strip().lower(), password_hash, password_salt, datetime.now(timezone.utc).isoformat()),
         )
         self._conn.commit()
         return int(cur.lastrowid)
 
-    def get_user(self, username: str) -> sqlite3.Row | None:
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute("SELECT * FROM users WHERE username = ?", (username.strip().lower(),))
+    def get_user(self, username: str) -> Any | None:
+        self._use_dict_rows()
+        cur = self._execute("SELECT * FROM users WHERE username = ?", (username.strip().lower(),))
         return cur.fetchone()
 
     def get_user_id(self, username: str) -> int | None:
         row = self.get_user(username)
         return int(row["id"]) if row else None
 
-    def get_user_by_id(self, user_id: int) -> sqlite3.Row | None:
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+    def get_user_by_id(self, user_id: int) -> Any | None:
+        self._use_dict_rows()
+        cur = self._execute("SELECT * FROM users WHERE id = ?", (user_id,))
         return cur.fetchone()
 
     def authenticate_user(self, username: str, password: str) -> int | None:
@@ -168,7 +287,7 @@ class PredictionRecorder:
         token = secrets.token_urlsafe(32)
         created = datetime.now(timezone.utc)
         expires = created + timedelta(hours=ttl_hours)
-        self._conn.execute(
+        self._execute(
             "INSERT INTO sessions (token, user_id, created_ts, expires_ts) VALUES (?, ?, ?, ?)",
             (token, user_id, created.isoformat(), expires.isoformat()),
         )
@@ -176,8 +295,8 @@ class PredictionRecorder:
         return token
 
     def get_session_user_id(self, token: str) -> int | None:
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
+        self._use_dict_rows()
+        cur = self._execute(
             "SELECT user_id, expires_ts FROM sessions WHERE token = ?",
             (token,),
         )
@@ -194,7 +313,7 @@ class PredictionRecorder:
         return int(row["user_id"])
 
     def delete_session(self, token: str) -> None:
-        self._conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        self._execute("DELETE FROM sessions WHERE token = ?", (token,))
         self._conn.commit()
 
     def _scope_user_id(self, user_id: int | None) -> int:
@@ -202,8 +321,8 @@ class PredictionRecorder:
 
     def get_settings(self, user_id: int | None = None) -> dict[str, str]:
         scoped_user_id = self._scope_user_id(user_id)
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute("SELECT key, value FROM user_app_settings WHERE user_id = ?", (scoped_user_id,))
+        self._use_dict_rows()
+        cur = self._execute("SELECT key, value FROM user_app_settings WHERE user_id = ?", (scoped_user_id,))
         settings = dict(_DEFAULT_SETTINGS)
         for row in cur.fetchall():
             settings[str(row["key"])] = str(row["value"])
@@ -212,7 +331,7 @@ class PredictionRecorder:
     def upsert_settings(self, settings: dict[str, str], user_id: int | None = None) -> None:
         scoped_user_id = self._scope_user_id(user_id)
         for key, value in settings.items():
-            self._conn.execute(
+            self._execute(
                 "INSERT INTO user_app_settings (user_id, key, value) VALUES (?, ?, ?)"
                 " ON CONFLICT(user_id, key) DO UPDATE SET value=excluded.value",
                 (scoped_user_id, str(key), str(value)),
@@ -221,7 +340,20 @@ class PredictionRecorder:
 
     def record(self, p: Prediction, user_id: int | None = None) -> int:
         scoped_user_id = self._scope_user_id(user_id)
-        cur = self._conn.execute(
+        if self._backend == "postgres":
+            cur = self._execute(
+                "INSERT INTO predictions (user_id, ts, symbol, timeframe, profile, news_sources, news_score, news_confidence, news_rationale,"
+                " technical_score, technical_reasons_json, final_score, final_direction,"
+                " final_confidence, price_at_prediction)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                (scoped_user_id, p.ts.isoformat(), p.symbol, p.timeframe, p.profile, p.news_sources, p.news_score, p.news_confidence, p.news_rationale,
+                 p.technical_score, json.dumps(p.technical_reasons), p.final_score,
+                 p.final_direction.value, p.final_confidence, p.price_at_prediction),
+            )
+            row = cur.fetchone()
+            self._conn.commit()
+            return int(row["id"])
+        cur = self._execute(
             "INSERT INTO predictions (user_id, ts, symbol, timeframe, profile, news_sources, news_score, news_confidence, news_rationale,"
             " technical_score, technical_reasons_json, final_score, final_direction,"
             " final_confidence, price_at_prediction)"
@@ -238,7 +370,7 @@ class PredictionRecorder:
                          timeframes: str = "1d", profiles: str = "balanced",
                          user_id: int | None = None) -> None:
         scoped_user_id = self._scope_user_id(user_id)
-        self._conn.execute(
+        self._execute(
             "INSERT INTO user_watchlist (user_id, symbol, name, sector, notes, sources, timeframes, profiles)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(user_id, symbol) DO UPDATE SET"
@@ -250,8 +382,8 @@ class PredictionRecorder:
 
     def list_watchlist(self, user_id: int | None = None) -> list[sqlite3.Row]:
         scoped_user_id = self._scope_user_id(user_id)
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute("SELECT * FROM user_watchlist WHERE user_id = ? ORDER BY symbol ASC", (scoped_user_id,))
+        self._use_dict_rows()
+        cur = self._execute("SELECT * FROM user_watchlist WHERE user_id = ? ORDER BY symbol ASC", (scoped_user_id,))
         return cur.fetchall()
 
     def record_comparison(self, *, ts: str, symbol: str, profile: str, timeframe: str,
@@ -260,7 +392,17 @@ class PredictionRecorder:
                           news_sources: str, hit: int | None = None,
                           user_id: int | None = None) -> int:
         scoped_user_id = self._scope_user_id(user_id)
-        cur = self._conn.execute(
+        if self._backend == "postgres":
+            cur = self._execute(
+                "INSERT INTO comparison_runs (user_id, ts, symbol, profile, timeframe, news_score, technical_score, final_score, final_direction, final_confidence, news_sources, hit)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                (scoped_user_id, ts, symbol, profile, timeframe, news_score, technical_score, final_score,
+                 final_direction, final_confidence, news_sources, hit),
+            )
+            row = cur.fetchone()
+            self._conn.commit()
+            return int(row["id"])
+        cur = self._execute(
             "INSERT INTO comparison_runs (user_id, ts, symbol, profile, timeframe, news_score, technical_score, final_score, final_direction, final_confidence, news_sources, hit)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (scoped_user_id, ts, symbol, profile, timeframe, news_score, technical_score, final_score,
@@ -271,8 +413,8 @@ class PredictionRecorder:
 
     def unresolved(self, user_id: int | None = None) -> list[sqlite3.Row]:
         scoped_user_id = self._scope_user_id(user_id)
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
+        self._use_dict_rows()
+        cur = self._execute(
             "SELECT id, ts, symbol, timeframe, final_direction, price_at_prediction"
             " FROM predictions WHERE hit IS NULL AND user_id = ?",
             (scoped_user_id,),
@@ -281,7 +423,7 @@ class PredictionRecorder:
 
     def resolve(self, prediction_id: int, actual_next_close: float,
                 actual_direction: Direction, hit: bool) -> None:
-        self._conn.execute(
+        self._execute(
             "UPDATE predictions SET actual_next_close = ?, actual_direction = ?, hit = ?"
             " WHERE id = ?",
             (actual_next_close, actual_direction.value, int(hit), prediction_id),
@@ -290,79 +432,89 @@ class PredictionRecorder:
 
     def recent(self, limit: int = 50, user_id: int | None = None) -> list[sqlite3.Row]:
         scoped_user_id = self._scope_user_id(user_id)
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
+        self._use_dict_rows()
+        cur = self._execute(
             "SELECT ts, symbol, final_score, final_direction, final_confidence,"
             " actual_direction, hit FROM predictions WHERE user_id = ? ORDER BY id DESC LIMIT ?",
             (scoped_user_id, limit),
         )
         return cur.fetchall()
 
+    def _since_clause(self, days: int) -> tuple[str, tuple[Any, ...]]:
+        if self._backend == "postgres":
+            return "ts >= NOW() - (%s || ' days')::interval", (days,)
+        return "ts >= datetime('now', ?)", (f"-{days} days",)
+
     def summary_by_profile(self, days: int = 30, user_id: int | None = None) -> list[sqlite3.Row]:
         scoped_user_id = self._scope_user_id(user_id)
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
+        self._use_dict_rows()
+        since_clause, since_params = self._since_clause(days)
+        cur = self._execute(
             "SELECT profile, COUNT(*) AS total, COALESCE(SUM(hit), 0) AS hits,"
             " ROUND(AVG(final_confidence), 3) AS avg_confidence,"
             " ROUND(AVG(final_score), 3) AS avg_score"
             " FROM predictions"
-            " WHERE user_id = ? AND ts >= datetime('now', ?)"
+            f" WHERE user_id = ? AND {since_clause}"
             " GROUP BY profile"
             " ORDER BY total DESC",
-            (scoped_user_id, f"-{days} days"),
+            (scoped_user_id, *since_params),
         )
         return cur.fetchall()
 
     def summary_by_timeframe(self, days: int = 30, user_id: int | None = None) -> list[sqlite3.Row]:
         scoped_user_id = self._scope_user_id(user_id)
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
+        self._use_dict_rows()
+        since_clause, since_params = self._since_clause(days)
+        cur = self._execute(
             "SELECT timeframe, COUNT(*) AS total, COALESCE(SUM(hit), 0) AS hits,"
             " ROUND(AVG(final_confidence), 3) AS avg_confidence,"
             " ROUND(AVG(final_score), 3) AS avg_score"
             " FROM predictions"
-            " WHERE user_id = ? AND ts >= datetime('now', ?)"
+            f" WHERE user_id = ? AND {since_clause}"
             " GROUP BY timeframe"
             " ORDER BY total DESC",
-            (scoped_user_id, f"-{days} days"),
+            (scoped_user_id, *since_params),
         )
         return cur.fetchall()
 
     def summary_by_direction(self, days: int = 30, user_id: int | None = None) -> list[sqlite3.Row]:
         scoped_user_id = self._scope_user_id(user_id)
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
+        self._use_dict_rows()
+        since_clause, since_params = self._since_clause(days)
+        cur = self._execute(
             "SELECT final_direction, COUNT(*) AS total, COALESCE(SUM(hit), 0) AS hits"
             " FROM predictions"
-            " WHERE user_id = ? AND ts >= datetime('now', ?)"
+            f" WHERE user_id = ? AND {since_clause}"
             " GROUP BY final_direction"
             " ORDER BY total DESC",
-            (scoped_user_id, f"-{days} days"),
+            (scoped_user_id, *since_params),
         )
         return cur.fetchall()
 
     def summary_by_symbol(self, days: int = 30, limit: int = 20, user_id: int | None = None) -> list[sqlite3.Row]:
         scoped_user_id = self._scope_user_id(user_id)
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(
+        self._use_dict_rows()
+        since_clause, since_params = self._since_clause(days)
+        cur = self._execute(
             "SELECT symbol, COUNT(*) AS total, COALESCE(SUM(hit), 0) AS hits,"
             " ROUND(AVG(final_confidence), 3) AS avg_confidence,"
             " ROUND(AVG(final_score), 3) AS avg_score"
             " FROM predictions"
-            " WHERE user_id = ? AND ts >= datetime('now', ?)"
+            f" WHERE user_id = ? AND {since_clause}"
             " GROUP BY symbol"
             " ORDER BY total DESC, hits DESC"
             " LIMIT ?",
-            (scoped_user_id, f"-{days} days", limit),
+            (scoped_user_id, *since_params, limit),
         )
         return cur.fetchall()
 
     def hit_rate(self, days: int, user_id: int | None = None) -> tuple[int, int]:
         scoped_user_id = self._scope_user_id(user_id)
-        cur = self._conn.execute(
+        since_clause, since_params = self._since_clause(days)
+        cur = self._execute(
             "SELECT COUNT(*), COALESCE(SUM(hit), 0) FROM predictions"
-            " WHERE user_id = ? AND hit IS NOT NULL AND ts >= datetime('now', ?)"
-            ,(scoped_user_id, f"-{days} days"),
+            f" WHERE user_id = ? AND hit IS NOT NULL AND {since_clause}",
+            (scoped_user_id, *since_params),
         )
         total, hits = cur.fetchone()
         return int(hits), int(total)
