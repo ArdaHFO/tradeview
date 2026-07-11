@@ -1,0 +1,7 @@
+yfinance
+feedparser
+anthropic
+python-dotenv
+pytest
+fastapi
+uvicorn
