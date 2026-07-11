@@ -55,6 +55,7 @@ def combine(
         news_rationale=news.rationale,
         technical_score=technical.score,
         technical_reasons=technical.reasons,
+        technical_indicators=technical.indicators,
         final_score=final_score,
         final_direction=direction,
         final_confidence=round(final_confidence, 3),

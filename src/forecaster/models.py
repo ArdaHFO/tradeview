@@ -43,11 +43,22 @@ class NewsVerdict:
     article_count: int = 0
 
 
+@dataclass(frozen=True)
+class IndicatorDetail:
+    """One technical indicator's reading, for display in the UI breakdown table."""
+    name: str
+    value: str                         # formatted for display, e.g. "63.2" or "Yukarı"
+    direction: Direction
+    weight_pct: float                  # this indicator's share of the technical score, e.g. 20.0
+    explanation: str                   # short, plain-language note on what it means
+
+
 @dataclass
 class TechnicalVerdict:
     symbol: str
     score: float                       # -1.0 .. 1.0
     reasons: list[str] = field(default_factory=list)
+    indicators: list[IndicatorDetail] = field(default_factory=list)
 
 
 @dataclass
@@ -66,6 +77,7 @@ class Prediction:
     timeframe: str = "1d"
     profile: str = "balanced"
     news_sources: str = "google"
+    technical_indicators: list[IndicatorDetail] = field(default_factory=list)
     actual_next_close: float | None = None
     actual_direction: Direction | None = None
     hit: bool | None = None

@@ -16,10 +16,12 @@ from pydantic import BaseModel, Field, field_validator
 
 from .config import Config
 from .models import Prediction
+from .news.fetch import fetch_articles
 from .pipeline import load_watchlist, run_for_symbols
 from .storage.recorder import PredictionRecorder
 from .symbols_search import search_symbols
-from .technical.data import ALLOWED_TIMEFRAMES
+from .technical.data import ALLOWED_TIMEFRAMES, fetch_bars
+from .technical.indicators import bollinger_bands, ema, sma
 
 log = logging.getLogger(__name__)
 COOKIE_NAME = "tradeview_session"
@@ -177,6 +179,13 @@ def _prediction_to_dict(p: Prediction) -> dict:
         "news_rationale": p.news_rationale,
         "technical_score": round(p.technical_score, 3),
         "technical_reasons": p.technical_reasons,
+        "technical_indicators": [
+            {
+                "name": ind.name, "value": ind.value, "direction": ind.direction.value,
+                "weight_pct": ind.weight_pct, "explanation": ind.explanation,
+            }
+            for ind in p.technical_indicators
+        ],
         "final_score": round(p.final_score, 3),
         "final_direction": p.final_direction.value,
         "final_confidence": round(p.final_confidence, 3),
@@ -346,6 +355,46 @@ def create_app(cfg: Config) -> FastAPI:
     @app.get("/api/symbols")
     def api_symbols(q: str = "", _: int = Depends(require_user)) -> JSONResponse:
         return JSONResponse(search_symbols(q))
+
+    @app.get("/api/news")
+    def api_news(symbol: str, name: str = "", sources: str = "google",
+                 user_id: int = Depends(require_user)) -> JSONResponse:
+        """Raw article list for a symbol — no AI scoring, no Groq cost."""
+        current_cfg = _get_runtime(user_id).current_cfg()
+        source_list = [s.strip() for s in sources.split(",") if s.strip()]
+        articles = fetch_articles(symbol, name or None, current_cfg, source_list)
+        return JSONResponse([
+            {
+                "title": a.title, "source": a.source, "url": a.url,
+                "published_ts": a.published_ts.isoformat(), "snippet": a.snippet,
+            }
+            for a in articles
+        ])
+
+    @app.get("/api/chart")
+    def api_chart(symbol: str, timeframe: str = "1d",
+                   user_id: int = Depends(require_user)) -> JSONResponse:
+        """Price series + indicator overlays for charting — no Groq cost."""
+        if timeframe not in ALLOWED_TIMEFRAMES:
+            timeframe = "1d"
+        current_cfg = _get_runtime(user_id).current_cfg()
+        bars = fetch_bars(symbol, current_cfg, timeframe)
+        closes = [b.close for b in bars]
+        sma50 = sma(closes, 50)
+        sma200 = sma(closes, 200) if len(closes) >= 200 else [None] * len(closes)
+        ema20 = ema(closes, 20)
+        upper, mid, lower = bollinger_bands(closes)
+        return JSONResponse({
+            "symbol": symbol,
+            "dates": [b.ts.isoformat() for b in bars],
+            "close": closes,
+            "sma50": sma50,
+            "sma200": sma200,
+            "ema20": ema20,
+            "bb_upper": upper,
+            "bb_mid": mid,
+            "bb_lower": lower,
+        })
 
     @app.get("/api/settings")
     def api_settings(user_id: int = Depends(require_user)) -> JSONResponse:
@@ -556,7 +605,7 @@ def create_app(cfg: Config) -> FastAPI:
 PAGE = """<!doctype html>
 <html lang="tr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TradeView Dashboard</title>
+<title>TradeView — Küresel Haber + Teknik Analiz</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 :root{--bg:#07111f;--bg2:#0c1629;--panel:#101b30;--panel2:#13213a;--text:#e7eefb;--muted:#8ea4c7;--line:#223557;--green:#31c48d;--red:#ff6b6b;--amber:#f4b942;--blue:#6ca7ff}
@@ -565,9 +614,11 @@ body{margin:0;min-height:100vh;font:14px/1.55 Inter,Segoe UI,sans-serif;color:va
 .wrap{max-width:1280px;margin:0 auto;padding:28px 20px 40px}
 .hero{display:flex;justify-content:space-between;gap:20px;align-items:flex-end;flex-wrap:wrap;margin-bottom:18px}
 h1{margin:0;font-size:30px;letter-spacing:-.02em}
+h1 .tag{font-size:13px;font-weight:600;color:var(--muted);vertical-align:middle;margin-left:8px}
 .sub{color:var(--muted);margin-top:6px}
 .badge{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.03)}
 .pill{display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--muted);font-size:12px}
+.pill.good{color:var(--green);border-color:rgba(49,196,141,.4)}.pill.warn{color:var(--amber);border-color:rgba(244,185,66,.4)}.pill.danger{color:var(--red);border-color:rgba(255,107,107,.4)}
 .grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}
 .card{background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.015));border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:0 18px 40px rgba(0,0,0,.22)}
 .stat{grid-column:span 3}.stat .v{font-size:26px;font-weight:700;margin-top:8px}.stat .l{color:var(--muted);font-size:12px}
@@ -583,6 +634,7 @@ input[type=text]:focus{border-color:#35558b;box-shadow:0 0 0 4px rgba(108,167,25
 .chip button,.btn{border:0;cursor:pointer;border-radius:12px}.chip button{background:transparent;color:var(--muted);padding:0;font-size:14px}
 .btn{padding:10px 14px;font-weight:600;color:#06111e;background:var(--blue)}.btn.alt{background:rgba(255,255,255,.08);color:var(--text);border:1px solid var(--line)}.btn.good{background:var(--green)}.btn.warn{background:var(--amber)}.btn.danger{background:var(--red)}
 .btn:disabled{opacity:.55;cursor:not-allowed}
+.btn.small{padding:6px 10px;font-size:12px}
 .settings-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:10px}
 .field{display:flex;flex-direction:column;gap:6px}
 .field label{font-size:12px;color:var(--muted)}
@@ -592,22 +644,43 @@ table{width:100%;border-collapse:collapse}th,td{padding:11px 10px;border-bottom:
 .up{color:var(--green);font-weight:700}.down{color:var(--red);font-weight:700}.neutral{color:var(--muted);font-weight:700}.reasons,.muted{color:var(--muted)}.empty{color:var(--muted);padding:18px 10px;font-style:italic;text-align:center}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:12px}.legend span{display:inline-flex;align-items:center;gap:6px}.dot{width:10px;height:10px;border-radius:999px;display:inline-block}
 canvas{width:100%!important;height:320px!important}
-@media (max-width:1000px){.stat,.half{grid-column:span 12}}
+.row-clickable{cursor:pointer}
+.row-clickable:hover td{background:rgba(255,255,255,.03)}
+.skel{background:linear-gradient(90deg, rgba(255,255,255,.04) 25%, rgba(255,255,255,.09) 37%, rgba(255,255,255,.04) 63%);background-size:400% 100%;animation:skel 1.4s ease infinite;border-radius:8px;height:14px}
+@keyframes skel{0%{background-position:100% 50%}100%{background-position:0 50%}}
+.modal-overlay{position:fixed;inset:0;background:rgba(3,8,16,.72);display:none;align-items:flex-start;justify-content:center;z-index:100;padding:32px 16px;overflow-y:auto}
+.modal-overlay.open{display:flex}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:18px;max-width:960px;width:100%;padding:22px;box-shadow:0 30px 80px rgba(0,0,0,.5)}
+.modal-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;gap:12px}
+.modal-close{background:none;border:1px solid var(--line);color:var(--muted);border-radius:10px;padding:6px 14px;cursor:pointer;font-size:14px}
+.modal-close:hover{background:rgba(255,255,255,.06)}
+.score-badges{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+.score-badge{display:flex;flex-direction:column;gap:4px;padding:10px 14px;border-radius:14px;background:rgba(255,255,255,.04);border:1px solid var(--line);min-width:120px}
+.score-badge .num{font-size:20px;font-weight:800}
+.score-bar{height:6px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:4px}
+.score-bar i{display:block;height:100%;border-radius:999px}
+.ind-table td.dirUP{color:var(--green);font-weight:700}.ind-table td.dirDOWN{color:var(--red);font-weight:700}.ind-table td.dirNEUTRAL{color:var(--muted);font-weight:700}
+.news-item{padding:10px 0;border-bottom:1px solid rgba(255,255,255,.06)}
+.news-item a{color:var(--text);text-decoration:none;font-weight:600}
+.news-item a:hover{text-decoration:underline;color:var(--blue)}
+.news-meta{color:var(--muted);font-size:12px;margin-top:2px}
+.section-title{margin:20px 0 10px;font-size:15px;font-weight:700;display:flex;align-items:center;gap:8px}
+@media (max-width:1000px){.stat,.half{grid-column:span 12}.settings-grid{grid-template-columns:repeat(2,1fr)}}
 </style></head><body>
 <div class="wrap">
   <div class="hero">
     <div>
-      <h1>TradeView</h1>
-      <div class="sub">Haber + teknik analiz, Groq destekli yorumlama, watchlist yönetimi ve performans dashboard'u.</div>
+      <h1>TradeView <span class="tag">🌍 Türkiye · ABD · Avrupa · Asya — tüm dünya piyasaları</span></h1>
+      <div class="sub">Haber + teknik analiz, yapay zekâ destekli yorumlama, favori listesi ve performans panosu.</div>
     </div>
-    <div class="badge"><span id="modelBadge" class="pill">Groq: —</span><span id="status" class="pill">idle</span></div>
+    <div class="badge"><span id="modelBadge" class="pill">AI Modeli: —</span><span id="status" class="pill">Boşta</span></div>
   </div>
 
     <div class="card panel" id="authCard">
         <div class="row" style="justify-content:space-between;margin-bottom:10px">
             <div>
                 <h3 style="margin:0">Hesap</h3>
-                <div class="sub">Kendi hesabını oluştur ya da giriş yap. Ayarlar ve watchlist bu hesaba özel kaydedilir.</div>
+                <div class="sub">Kendi hesabını oluştur ya da giriş yap. Ayarlar ve favori listen bu hesaba özel kaydedilir.</div>
             </div>
             <div id="meStatus" class="pill">oturum yok</div>
         </div>
@@ -622,55 +695,55 @@ canvas{width:100%!important;height:320px!important}
     <div id="app_shell" style="display:none">
 
   <div class="grid">
-    <div class="card stat"><div class="l">Son 30 gün hit rate</div><div id="statHit" class="v">-</div></div>
-    <div class="card stat"><div class="l">Watchlist</div><div id="statWatchlist" class="v">-</div></div>
-    <div class="card stat"><div class="l">Son model grubu</div><div id="statModel" class="v">-</div></div>
-    <div class="card stat"><div class="l">Son zaman dilimi</div><div id="statTf" class="v">-</div></div>
+    <div class="card stat"><div class="l">Son 30 Gün İsabet Oranı</div><div id="statHit" class="v">-</div></div>
+    <div class="card stat"><div class="l">Favori Sayısı</div><div id="statWatchlist" class="v">-</div></div>
+    <div class="card stat"><div class="l">Son Kullanılan Profil</div><div id="statModel" class="v">-</div></div>
+    <div class="card stat"><div class="l">Son Kullanılan Zaman Dilimi</div><div id="statTf" class="v">-</div></div>
 
     <div class="card search">
       <div class="row" style="justify-content:space-between;margin-bottom:10px">
-        <div class="muted">Sembol veya şirket ara, seç ve analiz et.</div>
-        <div class="legend"><span><i class="dot" style="background:var(--green)"></i> UP</span><span><i class="dot" style="background:var(--red)"></i> DOWN</span><span><i class="dot" style="background:var(--muted)"></i> NEUTRAL</span></div>
+        <div class="muted">Dünyanın herhangi bir borsasından sembol veya şirket adı ara (ör. AAPL, ASELS, THYAO, SAP, MC), seç ve analiz et.</div>
+        <div class="legend"><span><i class="dot" style="background:var(--green)"></i> Yükseliş</span><span><i class="dot" style="background:var(--red)"></i> Düşüş</span><span><i class="dot" style="background:var(--muted)"></i> Nötr</span></div>
       </div>
-      <input type="text" id="q" placeholder="AAPL, Apple, MSFT..." autocomplete="off">
+      <input type="text" id="q" placeholder="AAPL, ASELS, THYAO, SAP, MC, Apple, Tesla..." autocomplete="off">
       <div id="dd" class="dropdown" style="display:none"></div>
       <div class="row" style="margin-top:12px;gap:16px;flex-wrap:wrap">
-        <div class="field" style="min-width:180px">
+        <div class="field" style="min-width:220px">
           <label>Zaman dilimi (yeni eklenecek semboller için)</label>
           <div class="row" id="tf_controls">
-            <label><input type="checkbox" class="tf_cb" value="1d" checked> 1d</label>
-            <label><input type="checkbox" class="tf_cb" value="1h"> 1h</label>
-            <label><input type="checkbox" class="tf_cb" value="30m"> 30m</label>
-            <label><input type="checkbox" class="tf_cb" value="1wk"> 1wk</label>
-            <label><input type="checkbox" class="tf_cb" value="1mo"> 1mo</label>
+            <label><input type="checkbox" class="tf_cb" value="1d" checked> 1 gün</label>
+            <label><input type="checkbox" class="tf_cb" value="1h"> 1 saat</label>
+            <label><input type="checkbox" class="tf_cb" value="30m"> 30 dk</label>
+            <label><input type="checkbox" class="tf_cb" value="1wk"> 1 hafta</label>
+            <label><input type="checkbox" class="tf_cb" value="1mo"> 1 ay</label>
           </div>
         </div>
-        <div class="field" style="min-width:160px">
-          <label>Profil</label>
+        <div class="field" style="min-width:180px">
+          <label>Analiz profili</label>
           <select id="profile_control">
-            <option value="balanced">balanced</option>
-            <option value="news_heavy">news_heavy</option>
-            <option value="technical_heavy">technical_heavy</option>
-            <option value="news_only">news_only</option>
-            <option value="technical_only">technical_only</option>
+            <option value="balanced">Dengeli (haber + teknik)</option>
+            <option value="news_heavy">Haber ağırlıklı</option>
+            <option value="technical_heavy">Teknik ağırlıklı</option>
+            <option value="news_only">Sadece haber</option>
+            <option value="technical_only">Sadece teknik</option>
           </select>
         </div>
-        <div class="field" style="min-width:140px">
+        <div class="field" style="min-width:160px">
           <label>Haber kaynağı</label>
           <div class="row" id="src_controls">
-            <label><input type="checkbox" class="src_cb" value="google" checked> Google</label>
-            <label><input type="checkbox" class="src_cb" value="yahoo"> Yahoo</label>
+            <label><input type="checkbox" class="src_cb" value="google" checked> Google Haberler</label>
+            <label><input type="checkbox" class="src_cb" value="yahoo"> Yahoo Finans</label>
           </div>
         </div>
       </div>
       <div class="row" style="margin-top:12px;justify-content:space-between">
         <div class="chips" id="chips"></div>
         <div class="row">
-          <button class="btn good" id="go" onclick="analyze()">Analiz Et</button>
-          <button class="btn alt" onclick="compareModels()">Model Karşılaştır</button>
-          <button class="btn alt" onclick="multiTimeframe()">Çok Zaman Dilimi</button>
-          <button class="btn alt" onclick="saveWatchlist()">Watchlist'e Kaydet</button>
-          <button class="btn alt" onclick="loadDashboard()">Dashboard Yenile</button>
+          <button class="btn good" id="go" onclick="analyze()">▶ Analiz Et</button>
+          <button class="btn alt" onclick="compareModels()">⚖ Profil Karşılaştır</button>
+          <button class="btn alt" onclick="multiTimeframe()">⏱ Çok Zaman Dilimi</button>
+          <button class="btn alt" onclick="saveWatchlist()">★ Favorilere Ekle</button>
+          <button class="btn alt" onclick="loadDashboard()">↻ Panoyu Yenile</button>
         </div>
       </div>
       <div id="progress" class="sub" style="margin-top:10px"></div>
@@ -679,18 +752,18 @@ canvas{width:100%!important;height:320px!important}
         <div class="card panel">
             <div class="row" style="justify-content:space-between;margin-bottom:6px">
                 <h3 style="margin:0">Uygulama Ayarları</h3>
-                <span class="muted">Model, ağırlıklar ve veri ufku burada değişir</span>
+                <span class="muted">Yapay zekâ modeli, ağırlıklar ve veri ufku burada değişir</span>
             </div>
             <div class="settings-grid">
-                <div class="field"><label>Groq model</label><input id="set_groq_model" type="text"></div>
-                <div class="field"><label>News weight</label><input id="set_news_weight" type="text"></div>
-                <div class="field"><label>Technical weight</label><input id="set_technical_weight" type="text"></div>
-                <div class="field"><label>Neutral band</label><input id="set_neutral_band" type="text"></div>
-                <div class="field"><label>News lookback hours</label><input id="set_news_lookback_hours" type="text"></div>
-                <div class="field"><label>Max articles / symbol</label><input id="set_max_articles_per_symbol" type="text"></div>
-                <div class="field"><label>Max symbols / run</label><input id="set_max_symbols_per_run" type="text"></div>
-                <div class="field"><label>Intraday lookback</label><input id="set_intraday_lookback_period" type="text"></div>
-                <div class="field"><label>Technical lookback</label><input id="set_technical_lookback_period" type="text"></div>
+                <div class="field"><label>AI Modeli</label><input id="set_groq_model" type="text"></div>
+                <div class="field"><label>Haber Ağırlığı (0-1)</label><input id="set_news_weight" type="text"></div>
+                <div class="field"><label>Teknik Ağırlık (0-1)</label><input id="set_technical_weight" type="text"></div>
+                <div class="field"><label>Nötr Bant (0-1)</label><input id="set_neutral_band" type="text"></div>
+                <div class="field"><label>Haber Geriye Bakış (saat)</label><input id="set_news_lookback_hours" type="text"></div>
+                <div class="field"><label>Sembol Başına Maks. Haber</label><input id="set_max_articles_per_symbol" type="text"></div>
+                <div class="field"><label>Çalıştırma Başına Maks. Sembol</label><input id="set_max_symbols_per_run" type="text"></div>
+                <div class="field"><label>Gün İçi Veri Aralığı</label><input id="set_intraday_lookback_period" type="text"></div>
+                <div class="field"><label>Teknik Veri Aralığı</label><input id="set_technical_lookback_period" type="text"></div>
             </div>
             <div class="row" style="margin-top:12px;justify-content:flex-end">
                 <button class="btn alt" onclick="loadSettings()">Yenile</button>
@@ -699,18 +772,51 @@ canvas{width:100%!important;height:320px!important}
             <div id="settings_status" class="sub" style="margin-top:8px"></div>
         </div>
 
-    <div class="card half"><h3 style="margin:0 0 10px">Performans</h3><canvas id="hitChart"></canvas></div>
-    <div class="card half"><h3 style="margin:0 0 10px">Model / Zaman Dilimi</h3><canvas id="barChart"></canvas></div>
+    <div class="card half"><h3 style="margin:0 0 10px">📈 Performans (Kümülatif İsabet Oranı)</h3><canvas id="hitChart"></canvas></div>
+    <div class="card half"><h3 style="margin:0 0 10px">📊 Profil / Zaman Dilimi Bazında İsabet</h3><canvas id="barChart"></canvas></div>
 
-    <div class="card panel"><h3 style="margin:0 0 10px">Son Analiz Sonuçları</h3>
-      <table><thead><tr><th>Sembol</th><th>Zaman</th><th>Profil</th><th>Yön</th><th>Final</th><th>Güven</th><th>Haber</th><th>Teknik</th><th>Detay</th></tr></thead><tbody id="results"><tr><td colspan="9" class="empty">Henüz analiz yok</td></tr></tbody></table>
+    <div class="card panel" id="compareCard" style="display:none">
+      <h3 style="margin:0 0 4px">⚖ Hisse Karşılaştırma</h3>
+      <div class="sub" style="margin-bottom:10px">Bu çalıştırmada analiz edilen semboller yan yana.</div>
+      <canvas id="compareChartCanvas" style="margin-bottom:14px"></canvas>
+      <table><thead><tr><th>Sembol</th><th>Yön</th><th>Final Skor</th><th>Haber Skoru</th><th>Teknik Skor</th><th>Güven</th></tr></thead>
+      <tbody id="compareTable"></tbody></table>
     </div>
 
-    <div class="card half"><h3 style="margin:0 0 10px">Watchlist</h3><table><thead><tr><th>Sembol</th><th>Ad</th><th>Sinyal</th><th>Detay</th></tr></thead><tbody id="watchlist"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
-    <div class="card half"><h3 style="margin:0 0 10px">Güncel İzleme</h3><table><thead><tr><th>Zaman</th><th>Sembol</th><th>Yön</th><th>İsabet</th></tr></thead><tbody id="history"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
+    <div class="card panel"><h3 style="margin:0 0 10px">🔍 Son Analiz Sonuçları <span class="muted" style="font-weight:400;font-size:12px">— bir satıra tıklayarak haberleri, grafiği ve gösterge detaylarını gör</span></h3>
+      <table><thead><tr><th>Sembol</th><th>Zaman Dilimi</th><th>Profil</th><th>Yön</th><th>Final</th><th>Güven</th><th>Haber</th><th>Teknik</th><th>Detay</th></tr></thead><tbody id="results"><tr><td colspan="9" class="empty">Henüz analiz yok — yukarıdan bir sembol seçip "Analiz Et" butonuna basın.</td></tr></tbody></table>
+    </div>
+
+    <div class="card half"><h3 style="margin:0 0 10px">★ Favori Listem</h3><table><thead><tr><th>Sembol</th><th>Ad</th><th>Profil / Zaman Dilimi</th><th>Kaynak</th></tr></thead><tbody id="watchlist"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
+    <div class="card half"><h3 style="margin:0 0 10px">🕓 Geçmiş Tahminler</h3><table><thead><tr><th>Zaman</th><th>Sembol</th><th>Yön</th><th>İsabet</th></tr></thead><tbody id="history"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
     </div>
 
     </div>
+</div>
+
+<div class="modal-overlay" id="detailModal" onclick="if(event.target===this) closeDetail()">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <h2 id="detailTitle" style="margin:0">—</h2>
+        <div id="detailSub" class="sub"></div>
+      </div>
+      <button class="modal-close" onclick="closeDetail()">✕ Kapat</button>
+    </div>
+    <div class="score-badges" id="detailScores"></div>
+
+    <div class="section-title">💬 Yapay Zekâ Haber Yorumu</div>
+    <div id="detailNewsRationale" class="muted"></div>
+
+    <div class="section-title">📰 İlgili Haberler</div>
+    <div id="detailNews"><div class="muted">Yükleniyor...</div></div>
+
+    <div class="section-title">📈 Fiyat Grafiği (gösterge overlay'leri ile)</div>
+    <canvas id="detailChartCanvas"></canvas>
+
+    <div class="section-title">🧮 Teknik Gösterge Detayı</div>
+    <div id="detailIndicators"></div>
+  </div>
 </div>
 
 <script>
@@ -721,6 +827,9 @@ let barChart = null;
 let appSettings = {};
 
 function dirClass(d){ return d==='UP' ? 'up' : (d==='DOWN' ? 'down' : 'neutral'); }
+function dirLabel(d){ return d==='UP' ? 'YÜKSELİŞ' : (d==='DOWN' ? 'DÜŞÜŞ' : 'NÖTR'); }
+function dirArrow(d){ return d==='UP' ? '▲' : (d==='DOWN' ? '▼' : '–'); }
+function statusLabel(s){ return {idle:'Boşta', running:'Çalışıyor', done:'Tamam', error:'Hata'}[s] || s; }
 function esc(s){
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -732,6 +841,15 @@ function errDetail(err){
   return JSON.stringify(d);
 }
 function pct(hit, total){ return total ? Math.round(100 * hit / total) + '%' : '0%'; }
+function currencyForSymbol(sym){
+  const suf = (sym || '').includes('.') ? sym.split('.').pop().toUpperCase() : '';
+  const map = {IS:'₺', PA:'€', DE:'€', F:'€', AS:'€', MI:'€', MC:'€', L:'£', SW:'CHF', T:'¥', HK:'HK$', KS:'₩', SA:'R$'};
+  return map[suf] || '$';
+}
+function formatPrice(sym, value){
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+  return currencyForSymbol(sym) + Number(value).toFixed(2);
+}
 
 const qEl = document.getElementById('q');
 let searchDebounce = null;
@@ -851,7 +969,7 @@ function applySettingsToForm(settings){
         const input = document.getElementById(`set_${key}`);
         if (input) input.value = value;
     }
-    document.getElementById('modelBadge').textContent = 'Groq: ' + esc(settings.groq_model || '—');
+    document.getElementById('modelBadge').textContent = 'AI Modeli: ' + esc(settings.groq_model || '—');
 }
 
 async function loadSettings(){
@@ -894,28 +1012,39 @@ async function saveSettings(){
 
 function startPolling(){ if (pollTimer) return; pollTimer = setInterval(refreshState, 1500); refreshState(); }
 
+let lastResults = [];
+
+function skeletonRows(cols, rows){
+  const cells = Array.from({length: cols}, () => `<td><div class="skel"></div></td>`).join('');
+  return Array.from({length: rows}, () => `<tr>${cells}</tr>`).join('');
+}
+
 async function refreshState(){
   const r = await fetch('/api/state');
   const s = await r.json();
   const st = document.getElementById('status');
-  st.textContent = s.status + (s.progress ? ' · ' + s.progress : '');
+  st.textContent = statusLabel(s.status) + (s.progress ? ' · ' + s.progress : '');
   st.className = 'pill ' + (s.status === 'error' ? 'danger' : (s.status === 'running' ? 'warn' : 'good'));
   document.getElementById('go').disabled = (s.status === 'running');
   document.getElementById('progress').textContent = s.error ? ('Hata: ' + s.error) : (s.progress || '');
 
   const results = document.getElementById('results');
-  if (s.results.length){
-    results.innerHTML = s.results.map(p => `<tr>
+  if (s.status === 'running' && !s.results.length){
+    results.innerHTML = skeletonRows(9, 3);
+  } else if (s.results.length){
+    lastResults = s.results;
+    results.innerHTML = s.results.map((p, i) => `<tr class="row-clickable" onclick="openDetail(${i})">
       <td><b>${esc(p.symbol)}</b></td>
       <td>${esc(p.timeframe)}</td>
       <td>${esc(p.profile)}</td>
-      <td class="${dirClass(p.final_direction)}">${esc(p.final_direction)}</td>
+      <td class="${dirClass(p.final_direction)}">${dirArrow(p.final_direction)} ${dirLabel(p.final_direction)}</td>
       <td>${p.final_score.toFixed(2)}</td>
       <td>${p.final_confidence.toFixed(2)}</td>
       <td>${p.news_score.toFixed(2)} (${p.news_confidence.toFixed(2)})</td>
       <td>${p.technical_score.toFixed(2)}</td>
-      <td class="reasons">${esc(p.news_rationale)}<br>${esc(p.technical_reasons.join('; '))}</td>
+      <td><button class="btn alt small" onclick="event.stopPropagation(); openDetail(${i})">🔍 İncele</button></td>
       </tr>`).join('');
+    renderComparison(s.results);
   }
   if (s.status !== 'running' && pollTimer){ clearInterval(pollTimer); pollTimer = null; loadHistory(); loadDashboard(); }
 }
@@ -927,9 +1056,9 @@ async function loadHistory(){
   const r = await fetch('/api/history?days=7');
   const s = await r.json();
   document.getElementById('history').innerHTML = s.recent.length ? s.recent.map(p => `<tr>
-    <td>${new Date(p.ts).toLocaleString()}</td>
+    <td>${new Date(p.ts).toLocaleString('tr-TR')}</td>
     <td><b>${esc(p.symbol)}</b></td>
-    <td class="${dirClass(p.final_direction)}">${esc(p.final_direction)}</td>
+    <td class="${dirClass(p.final_direction)}">${dirLabel(p.final_direction)}</td>
     <td>${p.hit === null ? '—' : (p.hit ? '✅' : '❌')}</td>
     </tr>`).join('') : '<tr><td colspan="4" class="empty">Henüz tahmin yok</td></tr>';
 }
@@ -946,7 +1075,7 @@ async function loadDashboard(){
 
   hitChart = chartOrUpdate(hitChart, document.getElementById('hitChart'), {
     type:'line',
-    data:{ labels:d.hit_series.map(x => new Date(x.ts).toLocaleDateString()), datasets:[{label:'Running hit rate %', data:d.hit_series.map(x => x.running_hit_rate), borderColor:'#6ca7ff', backgroundColor:'rgba(108,167,255,.18)', tension:.3, fill:true }]},
+    data:{ labels:d.hit_series.map(x => new Date(x.ts).toLocaleDateString('tr-TR')), datasets:[{label:'Kümülatif İsabet Oranı (%)', data:d.hit_series.map(x => x.running_hit_rate), borderColor:'#6ca7ff', backgroundColor:'rgba(108,167,255,.18)', tension:.3, fill:true }]},
     options:{ responsive:true, plugins:{ legend:{display:false} }, scales:{ y:{ beginAtZero:true, max:100, grid:{ color:'rgba(255,255,255,.06)' } }, x:{ grid:{ display:false } } } }
   });
 
@@ -969,8 +1098,121 @@ async function loadDashboard(){
       scales:{ y:{ beginAtZero:true, max:100, grid:{ color:'rgba(255,255,255,.06)' } }, x:{ grid:{ display:false } } } }
   });
 
-    document.getElementById('watchlist').innerHTML = d.watchlist.length ? d.watchlist.map(w => `<tr><td><b>${esc(w.symbol)}</b></td><td>${esc(w.name || '')}</td><td>${esc(w.profiles || '')} / ${esc(w.timeframes || '')}</td><td class="muted">${esc(w.sources || '')} <button class="btn alt" style="padding:6px 10px;margin-left:8px" onclick='editWatchlist(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Seç</button></td></tr>`).join('') : '<tr><td colspan="4" class="empty">Watchlist boş</td></tr>';
+    document.getElementById('watchlist').innerHTML = d.watchlist.length ? d.watchlist.map(w => `<tr><td><b>${esc(w.symbol)}</b></td><td>${esc(w.name || '')}</td><td>${esc(w.profiles || '')} / ${esc(w.timeframes || '')}</td><td class="muted">${esc(w.sources || '')} <button class="btn alt small" style="margin-left:8px" onclick='editWatchlist(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Seç</button></td></tr>`).join('') : '<tr><td colspan="4" class="empty">Favori listesi boş — bir sembol seçip "Favorilere Ekle" butonuna basın.</td></tr>';
 }
+
+let compareChart = null;
+function renderComparison(results){
+  const card = document.getElementById('compareCard');
+  if (!results || results.length < 2){ card.style.display = 'none'; return; }
+  card.style.display = '';
+  compareChart = chartOrUpdate(compareChart, document.getElementById('compareChartCanvas'), {
+    type: 'bar',
+    data: {
+      labels: results.map(p => p.symbol),
+      datasets: [{
+        label: 'Final Skor',
+        data: results.map(p => p.final_score),
+        backgroundColor: results.map(p => p.final_score > 0.15 ? '#31c48d' : (p.final_score < -0.15 ? '#ff6b6b' : '#8ea4c7')),
+      }],
+    },
+    options: { responsive:true, plugins:{legend:{display:false}},
+      scales:{ y:{min:-1, max:1, grid:{color:'rgba(255,255,255,.06)'}}, x:{grid:{display:false}} } },
+  });
+  document.getElementById('compareTable').innerHTML = results.map(p => `<tr>
+    <td><b>${esc(p.symbol)}</b></td>
+    <td class="${dirClass(p.final_direction)}">${dirArrow(p.final_direction)} ${dirLabel(p.final_direction)}</td>
+    <td>${p.final_score.toFixed(2)}</td>
+    <td>${p.news_score.toFixed(2)}</td>
+    <td>${p.technical_score.toFixed(2)}</td>
+    <td>${Math.round(p.final_confidence * 100)}%</td>
+    </tr>`).join('');
+}
+
+function scoreBadge(label, score, confidence){
+  const clamped = Math.max(-1, Math.min(1, score));
+  const barPct = Math.round(((clamped + 1) / 2) * 100);
+  const color = score > 0.15 ? 'var(--green)' : (score < -0.15 ? 'var(--red)' : 'var(--muted)');
+  const confRow = confidence === undefined || confidence === null ? '' :
+    `<div class="muted" style="font-size:11px">güven ${Math.round(confidence * 100)}%</div>`;
+  return `<div class="score-badge">
+    <div class="muted" style="font-size:11px">${esc(label)}</div>
+    <div class="num" style="color:${color}">${score >= 0 ? '+' : ''}${score.toFixed(2)}</div>
+    <div class="score-bar"><i style="width:${barPct}%;background:${color}"></i></div>
+    ${confRow}
+  </div>`;
+}
+
+function renderIndicatorTable(indicators){
+  if (!indicators || !indicators.length){
+    return '<div class="muted">Bu sembol için yeterli fiyat geçmişi olmadığından gösterge hesaplanamadı.</div>';
+  }
+  return `<table class="ind-table"><thead><tr><th>Gösterge</th><th>Değer</th><th>Yön</th><th>Ağırlık</th><th>Açıklama</th></tr></thead><tbody>
+    ${indicators.map(ind => `<tr>
+      <td><b>${esc(ind.name)}</b></td>
+      <td>${esc(ind.value)}</td>
+      <td class="dir${ind.direction}">${dirArrow(ind.direction)} ${dirLabel(ind.direction)}</td>
+      <td>${ind.weight_pct}%</td>
+      <td class="muted">${esc(ind.explanation)}</td>
+      </tr>`).join('')}
+  </tbody></table>`;
+}
+
+let detailChart = null;
+
+async function openDetail(idx){
+  const p = lastResults[idx];
+  if (!p) return;
+  document.getElementById('detailTitle').textContent = `${p.symbol} — ${dirLabel(p.final_direction)}`;
+  document.getElementById('detailSub').textContent =
+    `${esc(p.timeframe)} · ${esc(p.profile)} · İşlem fiyatı: ${formatPrice(p.symbol, p.price_at_prediction)}`;
+  document.getElementById('detailScores').innerHTML =
+    scoreBadge('Final Skor', p.final_score, p.final_confidence) +
+    scoreBadge('Haber Skoru (AI)', p.news_score, p.news_confidence) +
+    scoreBadge('Teknik Skor', p.technical_score, null);
+  document.getElementById('detailNewsRationale').textContent = p.news_rationale || 'Yorum yok.';
+  document.getElementById('detailIndicators').innerHTML = renderIndicatorTable(p.technical_indicators);
+  document.getElementById('detailNews').innerHTML = '<div class="muted">Haberler yükleniyor...</div>';
+  document.getElementById('detailModal').classList.add('open');
+
+  const sources = p.news_sources || 'google';
+  const newsUrl = `/api/news?symbol=${encodeURIComponent(p.symbol)}&name=${encodeURIComponent(p.symbol)}&sources=${encodeURIComponent(sources)}`;
+  const chartUrl = `/api/chart?symbol=${encodeURIComponent(p.symbol)}&timeframe=${encodeURIComponent(p.timeframe || '1d')}`;
+
+  const [newsResp, chartResp] = await Promise.all([fetch(newsUrl), fetch(chartUrl)]);
+  const news = await newsResp.json();
+  const chartData = await chartResp.json();
+
+  document.getElementById('detailNews').innerHTML = news.length ? news.map(a => `
+    <div class="news-item">
+      <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a>
+      <div class="news-meta">${esc(a.source)} · ${new Date(a.published_ts).toLocaleString('tr-TR')}</div>
+    </div>`).join('') : '<div class="muted">Bu sembol için haber bulunamadı.</div>';
+
+  const labels = (chartData.dates || []).map(d => new Date(d).toLocaleDateString('tr-TR'));
+  detailChart = chartOrUpdate(detailChart, document.getElementById('detailChartCanvas'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {label:'Kapanış', data:chartData.close, borderColor:'#6ca7ff', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:2},
+        {label:'SMA50', data:chartData.sma50, borderColor:'#f4b942', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:1},
+        {label:'SMA200', data:chartData.sma200, borderColor:'#ff6b6b', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:1},
+        {label:'EMA20', data:chartData.ema20, borderColor:'#31c48d', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:1},
+        {label:'Bollinger Üst', data:chartData.bb_upper, borderColor:'rgba(142,164,199,.5)', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:1, borderDash:[4,4]},
+        {label:'Bollinger Alt', data:chartData.bb_lower, borderColor:'rgba(142,164,199,.5)', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:1, borderDash:[4,4]},
+      ],
+    },
+    options: { responsive:true, plugins:{ legend:{labels:{color:'#e7eefb', boxWidth:12}} },
+      scales:{ y:{ grid:{color:'rgba(255,255,255,.06)'} }, x:{ grid:{display:false}, ticks:{maxTicksLimit:8} } } },
+  });
+}
+
+function closeDetail(){ document.getElementById('detailModal').classList.remove('open'); }
+
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') closeDetail();
+});
 
 async function loginUser(){
     const payload = {username: document.getElementById('auth_username').value, password: document.getElementById('auth_password').value};
