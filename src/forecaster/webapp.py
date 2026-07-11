@@ -401,7 +401,7 @@ def create_app(cfg: Config) -> FastAPI:
             })
 
     @app.get("/api/dashboard")
-    def api_dashboard(days: int = 30, request: Request, _: int = Depends(require_user)) -> JSONResponse:
+    def api_dashboard(request: Request, days: int = 30, _: int = Depends(require_user)) -> JSONResponse:
         user_id = require_user(request)
         recorder = _recorder()
         try:
@@ -442,7 +442,7 @@ def create_app(cfg: Config) -> FastAPI:
         })
 
     @app.get("/api/history")
-    def api_history(days: int = 7, request: Request, _: int = Depends(require_user)) -> JSONResponse:
+    def api_history(request: Request, days: int = 7, _: int = Depends(require_user)) -> JSONResponse:
         user_id = require_user(request)
         recorder = _recorder()
         try:
