@@ -20,7 +20,7 @@ def test_run_for_symbols_keeps_same_symbol_timeframes_separate(monkeypatch):
     class DummyRecorder:
         def __init__(self, db_path):
             pass
-        def record(self, prediction):
+        def record(self, prediction, user_id=None):
             recorded.append((prediction.symbol, prediction.timeframe, prediction.price_at_prediction))
         def close(self):
             pass
@@ -43,7 +43,7 @@ def test_run_for_symbols_keeps_same_symbol_timeframes_separate(monkeypatch):
     monkeypatch.setattr(pipeline, "analyze_news", fake_analyze_news)
     monkeypatch.setattr(pipeline, "fetch_bars", fake_fetch_bars)
     monkeypatch.setattr(pipeline, "score_technical", fake_score_technical)
-    monkeypatch.setattr(pipeline.backfill, "run", lambda cfg: None)
+    monkeypatch.setattr(pipeline.backfill, "run", lambda cfg, user_id=None: None)
 
     cfg = Config(groq_api_key="x")
     results = pipeline.run_for_symbols([

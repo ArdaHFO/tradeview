@@ -20,10 +20,10 @@ def _actual_direction(prev_price: float, next_price: float) -> Direction:
     return Direction.UP if pct > 0 else Direction.DOWN
 
 
-def run(cfg: Config) -> None:
+def run(cfg: Config, user_id: int | None = None) -> None:
     recorder = PredictionRecorder(cfg.db_path)
     try:
-        rows = recorder.unresolved()
+        rows = recorder.unresolved(user_id=user_id)
         for row in rows:
             price = latest_close(row["symbol"], cfg, row["timeframe"])
             if price is None:

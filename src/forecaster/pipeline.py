@@ -61,7 +61,7 @@ def _run_key(item: dict) -> str:
     return f"{item['symbol']}|{timeframe}|{profile}|{news_sources}"
 
 
-def run_for_symbols(symbols: list[dict], cfg: Config, progress_cb=None) -> list[Prediction]:
+def run_for_symbols(symbols: list[dict], cfg: Config, progress_cb=None, user_id: int | None = None) -> list[Prediction]:
     """Run the news+technical+fusion pipeline for an ad-hoc list of symbols.
 
     `symbols` is a list of {"symbol": ..., "name": ...} dicts (name optional).
@@ -72,7 +72,7 @@ def run_for_symbols(symbols: list[dict], cfg: Config, progress_cb=None) -> list[
             progress_cb(msg)
 
     report("resolving prior predictions...")
-    backfill.run(cfg)
+    backfill.run(cfg, user_id=user_id)
 
     report(f"fetching news + technicals for {len(symbols)} symbol(s)...")
     with ThreadPoolExecutor(max_workers=max(4, len(symbols) * 2)) as ex:
@@ -100,7 +100,7 @@ def run_for_symbols(symbols: list[dict], cfg: Config, progress_cb=None) -> list[
                 profile=profile,
                 news_sources=news_sources,
             )
-            recorder.record(prediction)
+            recorder.record(prediction, user_id=user_id)
             predictions.append(prediction)
     finally:
         recorder.close()

@@ -6,11 +6,11 @@ import io
 import logging
 import secrets
 import threading
+from dataclasses import replace
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import Config
 from .models import Prediction
@@ -19,6 +19,7 @@ from .storage.recorder import PredictionRecorder
 from .symbols_search import search_symbols
 
 log = logging.getLogger(__name__)
+COOKIE_NAME = "tradeview_session"
 
 
 class SymbolIn(BaseModel):
@@ -33,6 +34,11 @@ class AnalyzeRequest(BaseModel):
     symbols: list[SymbolIn]
 
 
+class AuthRequest(BaseModel):
+    username: str
+    password: str
+
+
 class WatchlistItemIn(BaseModel):
     symbol: str
     name: str | None = None
@@ -41,6 +47,63 @@ class WatchlistItemIn(BaseModel):
     sources: str = "google"
     timeframes: str = "1d"
     profiles: str = "balanced"
+
+
+class AppSettingsIn(BaseModel):
+    news_weight: float | None = Field(default=None, ge=0.0, le=1.0)
+    technical_weight: float | None = Field(default=None, ge=0.0, le=1.0)
+    neutral_band: float | None = Field(default=None, ge=0.0, le=1.0)
+    groq_model: str | None = None
+    news_lookback_hours: int | None = Field(default=None, ge=1, le=168)
+    max_articles_per_symbol: int | None = Field(default=None, ge=1, le=50)
+    max_symbols_per_run: int | None = Field(default=None, ge=1, le=100)
+    intraday_lookback_period: str | None = None
+    technical_lookback_period: str | None = None
+
+
+_SETTING_TYPES: dict[str, type] = {
+    "news_weight": float,
+    "technical_weight": float,
+    "neutral_band": float,
+    "groq_model": str,
+    "news_lookback_hours": int,
+    "max_articles_per_symbol": int,
+    "max_symbols_per_run": int,
+    "intraday_lookback_period": str,
+    "technical_lookback_period": str,
+}
+
+
+def _coerce_settings(raw: dict[str, str]) -> dict[str, object]:
+    coerced: dict[str, object] = {}
+    for key, expected_type in _SETTING_TYPES.items():
+        value = raw.get(key)
+        if value is None:
+            continue
+        coerced[key] = expected_type(value)
+    return coerced
+
+
+class RuntimeState:
+    def __init__(self, base_cfg: Config, initial_settings: dict[str, str]) -> None:
+        self.base_cfg = base_cfg
+        self.lock = threading.Lock()
+        self.settings = dict(initial_settings)
+
+    def snapshot(self) -> dict[str, object]:
+        with self.lock:
+            return _coerce_settings(self.settings)
+
+    def update(self, updates: dict[str, object]) -> dict[str, object]:
+        with self.lock:
+            for key, value in updates.items():
+                self.settings[key] = str(value)
+            return _coerce_settings(self.settings)
+
+    def current_cfg(self) -> Config:
+        with self.lock:
+            overrides = _coerce_settings(self.settings)
+        return replace(self.base_cfg, **overrides)
 
 
 def _prediction_to_dict(p: Prediction) -> dict:
@@ -63,27 +126,32 @@ def _prediction_to_dict(p: Prediction) -> dict:
 
 
 class AnalysisState:
-    def __init__(self, cfg: Config) -> None:
-        self.cfg = cfg
+    def __init__(self, runtime: RuntimeState) -> None:
+        self.runtime = runtime
         self.lock = threading.Lock()
         self.status = "idle"
         self.progress = ""
         self.results: list[dict] = []
         self.error: str | None = None
 
-    def start_analysis(self, symbols: list[dict]) -> bool:
+    def start_analysis(self, symbols: list[dict], user_id: int | None = None) -> bool:
         with self.lock:
             if self.status == "running":
                 return False
             self.status = "running"
             self.progress = ""
             self.error = None
-        threading.Thread(target=self._run, args=(symbols,), daemon=True).start()
+        threading.Thread(target=self._run, args=(symbols, user_id), daemon=True).start()
         return True
 
-    def _run(self, symbols: list[dict]) -> None:
+    def _run(self, symbols: list[dict], user_id: int | None) -> None:
         try:
-            predictions = run_for_symbols(symbols, self.cfg, progress_cb=self._set_progress)
+            predictions = run_for_symbols(
+                symbols,
+                self.runtime.current_cfg(),
+                progress_cb=self._set_progress,
+                user_id=user_id,
+            )
             with self.lock:
                 self.results = [_prediction_to_dict(p) for p in predictions]
                 self.status = "done"
@@ -101,60 +169,167 @@ class AnalysisState:
 
 def create_app(cfg: Config) -> FastAPI:
     app = FastAPI(title="Haber + Teknik Analiz Tahmin Sistemi")
-    state = AnalysisState(cfg)
-    security = HTTPBasic()
+    runtime_cache: dict[int, RuntimeState] = {}
+    state_cache: dict[int, AnalysisState] = {}
 
-    def require_auth(credentials: HTTPBasicCredentials = Depends(security)) -> None:
-        if not cfg.app_password:
-            return
-        if not secrets.compare_digest(credentials.password, cfg.app_password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Unauthorized",
-                headers={"WWW-Authenticate": "Basic"},
-            )
+    def _recorder() -> PredictionRecorder:
+        return PredictionRecorder(cfg.db_path)
+
+    def _get_user_id_from_request(request: Request) -> int | None:
+        token = request.cookies.get(COOKIE_NAME)
+        if not token:
+            return None
+        recorder = _recorder()
+        try:
+            return recorder.get_session_user_id(token)
+        finally:
+            recorder.close()
+
+    def require_user(request: Request) -> int:
+        user_id = _get_user_id_from_request(request)
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login required")
+        return user_id
+
+    def _get_runtime(user_id: int) -> RuntimeState:
+        runtime = runtime_cache.get(user_id)
+        if runtime is None:
+            recorder = _recorder()
+            try:
+                initial_settings = recorder.get_settings(user_id)
+            finally:
+                recorder.close()
+            runtime = RuntimeState(cfg, initial_settings)
+            runtime_cache[user_id] = runtime
+        return runtime
+
+    def _get_state(user_id: int) -> AnalysisState:
+        state = state_cache.get(user_id)
+        if state is None:
+            state = AnalysisState(_get_runtime(user_id))
+            state_cache[user_id] = state
+        return state
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
+    @app.post("/api/register")
+    def api_register(item: AuthRequest, response: Response) -> JSONResponse:
+        username = item.username.strip().lower()
+        if not username or not item.password:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username and password are required")
+        recorder = _recorder()
+        try:
+            if recorder.get_user(username) is not None:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User already exists")
+            user_id = recorder.create_user(username, item.password)
+            token = recorder.create_session(user_id)
+        finally:
+            recorder.close()
+        response = JSONResponse({"ok": True, "username": username})
+        response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7)
+        return response
+
+    @app.post("/api/login")
+    def api_login(item: AuthRequest) -> JSONResponse:
+        username = item.username.strip().lower()
+        recorder = _recorder()
+        try:
+            user_id = recorder.authenticate_user(username, item.password)
+            if user_id is None:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+            token = recorder.create_session(user_id)
+        finally:
+            recorder.close()
+        response = JSONResponse({"ok": True, "username": username})
+        response.set_cookie(COOKIE_NAME, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 7)
+        return response
+
+    @app.post("/api/logout")
+    def api_logout(request: Request) -> JSONResponse:
+        token = request.cookies.get(COOKIE_NAME)
+        if token:
+            recorder = _recorder()
+            try:
+                recorder.delete_session(token)
+            finally:
+                recorder.close()
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(COOKIE_NAME)
+        return response
+
+    @app.get("/api/me")
+    def api_me(request: Request) -> JSONResponse:
+        user_id = require_user(request)
+        recorder = _recorder()
+        try:
+            user = recorder.get_user_by_id(user_id)
+        finally:
+            recorder.close()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Login required")
+        return JSONResponse({"id": int(user["id"]), "username": str(user["username"])})
+
     @app.get("/api/symbols")
-    def api_symbols(q: str = "", _: None = Depends(require_auth)) -> JSONResponse:
+    def api_symbols(q: str = "", _: int = Depends(require_user)) -> JSONResponse:
         return JSONResponse(search_symbols(q))
 
+    @app.get("/api/settings")
+    def api_settings(request: Request, _: int = Depends(require_user)) -> JSONResponse:
+        user_id = require_user(request)
+        return JSONResponse(_get_runtime(user_id).snapshot())
+
+    @app.put("/api/settings")
+    def api_settings_update(item: AppSettingsIn, request: Request, _: int = Depends(require_user)) -> JSONResponse:
+        user_id = require_user(request)
+        updates = item.model_dump(exclude_none=True)
+        if not updates:
+            return JSONResponse(_get_runtime(user_id).snapshot())
+        recorder = _recorder()
+        try:
+            recorder.upsert_settings(updates, user_id=user_id)
+        finally:
+            recorder.close()
+        return JSONResponse(_get_runtime(user_id).update(updates))
+
     @app.get("/api/favorites")
-    def api_favorites(_: None = Depends(require_auth)) -> JSONResponse:
+    def api_favorites(_: int = Depends(require_user)) -> JSONResponse:
         try:
             return JSONResponse(load_watchlist(cfg.watchlist_path))
         except (OSError, ValueError):
             return JSONResponse([])
 
     @app.get("/api/watchlist")
-    def api_watchlist(_: None = Depends(require_auth)) -> JSONResponse:
-        recorder = PredictionRecorder(cfg.db_path)
+    def api_watchlist(request: Request, _: int = Depends(require_user)) -> JSONResponse:
+        user_id = require_user(request)
+        recorder = _recorder()
         try:
-            return JSONResponse([dict(row) for row in recorder.list_watchlist()])
+            return JSONResponse([dict(row) for row in recorder.list_watchlist(user_id=user_id)])
         finally:
             recorder.close()
 
     @app.post("/api/watchlist")
-    def api_watchlist_upsert(item: WatchlistItemIn, _: None = Depends(require_auth)) -> JSONResponse:
-        recorder = PredictionRecorder(cfg.db_path)
+    def api_watchlist_upsert(item: WatchlistItemIn, request: Request, _: int = Depends(require_user)) -> JSONResponse:
+        user_id = require_user(request)
+        recorder = _recorder()
         try:
             recorder.upsert_watchlist(
                 item.symbol, item.name, item.sector, item.notes,
-                item.sources, item.timeframes, item.profiles,
+                item.sources, item.timeframes, item.profiles, user_id=user_id,
             )
             return JSONResponse({"ok": True})
         finally:
             recorder.close()
 
     @app.post("/api/analyze")
-    def api_analyze(req: AnalyzeRequest, _: None = Depends(require_auth)) -> JSONResponse:
-        if len(req.symbols) > cfg.max_symbols_per_run:
+    def api_analyze(req: AnalyzeRequest, request: Request, _: int = Depends(require_user)) -> JSONResponse:
+        user_id = require_user(request)
+        current_cfg = _get_runtime(user_id).current_cfg()
+        if len(req.symbols) > current_cfg.max_symbols_per_run:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"En fazla {cfg.max_symbols_per_run} sembol seçebilirsiniz.",
+                detail=f"En fazla {current_cfg.max_symbols_per_run} sembol seçebilirsiniz.",
             )
         symbols = [{
             "symbol": s.symbol,
@@ -163,15 +338,17 @@ def create_app(cfg: Config) -> FastAPI:
             "profile": s.profile or "balanced",
             "news_sources": s.news_sources or ["google"],
         } for s in req.symbols]
-        started = state.start_analysis(symbols)
+        started = _get_state(user_id).start_analysis(symbols, user_id=user_id)
         return JSONResponse({"started": started})
 
     @app.post("/api/analyze/multi")
-    def api_analyze_multi(req: AnalyzeRequest, _: None = Depends(require_auth)) -> JSONResponse:
-        if len(req.symbols) > cfg.max_symbols_per_run:
+    def api_analyze_multi(req: AnalyzeRequest, request: Request, _: int = Depends(require_user)) -> JSONResponse:
+        user_id = require_user(request)
+        current_cfg = _get_runtime(user_id).current_cfg()
+        if len(req.symbols) > current_cfg.max_symbols_per_run:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"En fazla {cfg.max_symbols_per_run} sembol seçebilirsiniz.",
+                detail=f"En fazla {current_cfg.max_symbols_per_run} sembol seçebilirsiniz.",
             )
         symbols = [
             {
@@ -184,15 +361,17 @@ def create_app(cfg: Config) -> FastAPI:
             for s in req.symbols
             for timeframe in (s.timeframe.split(",") if s.timeframe else ["1d"])
         ]
-        started = state.start_analysis(symbols)
+        started = _get_state(user_id).start_analysis(symbols, user_id=user_id)
         return JSONResponse({"started": started, "runs": len(symbols)})
 
     @app.post("/api/analyze/compare")
-    def api_analyze_compare(req: AnalyzeRequest, _: None = Depends(require_auth)) -> JSONResponse:
-        if len(req.symbols) > cfg.max_symbols_per_run:
+    def api_analyze_compare(req: AnalyzeRequest, request: Request, _: int = Depends(require_user)) -> JSONResponse:
+        user_id = require_user(request)
+        current_cfg = _get_runtime(user_id).current_cfg()
+        if len(req.symbols) > current_cfg.max_symbols_per_run:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"En fazla {cfg.max_symbols_per_run} sembol seçebilirsiniz.",
+                detail=f"En fazla {current_cfg.max_symbols_per_run} sembol seçebilirsiniz.",
             )
         profiles = ["balanced", "news_heavy", "technical_heavy"]
         symbols = [
@@ -206,11 +385,13 @@ def create_app(cfg: Config) -> FastAPI:
             for s in req.symbols
             for profile in profiles
         ]
-        started = state.start_analysis(symbols)
+        started = _get_state(user_id).start_analysis(symbols, user_id=user_id)
         return JSONResponse({"started": started, "comparisons": len(symbols)})
 
     @app.get("/api/state")
-    def api_state(_: None = Depends(require_auth)) -> JSONResponse:
+    def api_state(request: Request, _: int = Depends(require_user)) -> JSONResponse:
+        user_id = require_user(request)
+        state = _get_state(user_id)
         with state.lock:
             return JSONResponse({
                 "status": state.status,
@@ -220,16 +401,18 @@ def create_app(cfg: Config) -> FastAPI:
             })
 
     @app.get("/api/dashboard")
-    def api_dashboard(days: int = 30, _: None = Depends(require_auth)) -> JSONResponse:
-        recorder = PredictionRecorder(cfg.db_path)
+    def api_dashboard(days: int = 30, request: Request, _: int = Depends(require_user)) -> JSONResponse:
+        user_id = require_user(request)
+        recorder = _recorder()
         try:
-            watchlist = [dict(row) for row in recorder.list_watchlist()]
-            recent = [dict(row) for row in recorder.recent(limit=50)]
-            hit_hits, hit_total = recorder.hit_rate(days)
-            by_profile = [dict(row) for row in recorder.summary_by_profile(days)]
-            by_timeframe = [dict(row) for row in recorder.summary_by_timeframe(days)]
-            by_direction = [dict(row) for row in recorder.summary_by_direction(days)]
-            by_symbol = [dict(row) for row in recorder.summary_by_symbol(days, limit=10)]
+            watchlist = [dict(row) for row in recorder.list_watchlist(user_id=user_id)]
+            recent = [dict(row) for row in recorder.recent(limit=50, user_id=user_id)]
+            hit_hits, hit_total = recorder.hit_rate(days, user_id=user_id)
+            by_profile = [dict(row) for row in recorder.summary_by_profile(days, user_id=user_id)]
+            by_timeframe = [dict(row) for row in recorder.summary_by_timeframe(days, user_id=user_id)]
+            by_direction = [dict(row) for row in recorder.summary_by_direction(days, user_id=user_id)]
+            by_symbol = [dict(row) for row in recorder.summary_by_symbol(days, limit=10, user_id=user_id)]
+            user = recorder.get_user_by_id(user_id)
         finally:
             recorder.close()
 
@@ -247,7 +430,9 @@ def create_app(cfg: Config) -> FastAPI:
 
         return JSONResponse({
             "watchlist": watchlist,
+            "user": {"id": int(user["id"]), "username": str(user["username"])} if user else None,
             "hit_rate": {"hits": hit_hits, "total": hit_total},
+            "settings": _get_runtime(user_id).snapshot(),
             "by_profile": by_profile,
             "by_timeframe": by_timeframe,
             "by_direction": by_direction,
@@ -257,11 +442,12 @@ def create_app(cfg: Config) -> FastAPI:
         })
 
     @app.get("/api/history")
-    def api_history(days: int = 7, _: None = Depends(require_auth)) -> JSONResponse:
-        recorder = PredictionRecorder(cfg.db_path)
+    def api_history(days: int = 7, request: Request, _: int = Depends(require_user)) -> JSONResponse:
+        user_id = require_user(request)
+        recorder = _recorder()
         try:
-            rows = recorder.recent(limit=50)
-            hits, total = recorder.hit_rate(days)
+            rows = recorder.recent(limit=50, user_id=user_id)
+            hits, total = recorder.hit_rate(days, user_id=user_id)
         finally:
             recorder.close()
         return JSONResponse({
@@ -270,10 +456,11 @@ def create_app(cfg: Config) -> FastAPI:
         })
 
     @app.get("/api/history.csv")
-    def api_history_csv(_: None = Depends(require_auth)) -> PlainTextResponse:
-        recorder = PredictionRecorder(cfg.db_path)
+    def api_history_csv(request: Request, _: int = Depends(require_user)) -> PlainTextResponse:
+        user_id = require_user(request)
+        recorder = _recorder()
         try:
-            rows = recorder.recent(limit=500)
+            rows = recorder.recent(limit=500, user_id=user_id)
         finally:
             recorder.close()
         buf = io.StringIO()
@@ -289,7 +476,7 @@ def create_app(cfg: Config) -> FastAPI:
         )
 
     @app.get("/", response_class=HTMLResponse)
-    def index(_: None = Depends(require_auth)) -> str:
+    def index() -> str:
         return PAGE
 
     return app
@@ -325,6 +512,11 @@ input[type=text]:focus{border-color:#35558b;box-shadow:0 0 0 4px rgba(108,167,25
 .chip button,.btn{border:0;cursor:pointer;border-radius:12px}.chip button{background:transparent;color:var(--muted);padding:0;font-size:14px}
 .btn{padding:10px 14px;font-weight:600;color:#06111e;background:var(--blue)}.btn.alt{background:rgba(255,255,255,.08);color:var(--text);border:1px solid var(--line)}.btn.good{background:var(--green)}.btn.warn{background:var(--amber)}.btn.danger{background:var(--red)}
 .btn:disabled{opacity:.55;cursor:not-allowed}
+.settings-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:10px}
+.field{display:flex;flex-direction:column;gap:6px}
+.field label{font-size:12px;color:var(--muted)}
+.field input,.field select{width:100%;background:rgba(255,255,255,.04);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:13px;outline:none}
+.field input:focus,.field select:focus{border-color:#35558b;box-shadow:0 0 0 4px rgba(108,167,255,.12)}
 table{width:100%;border-collapse:collapse}th,td{padding:11px 10px;border-bottom:1px solid rgba(255,255,255,.06);vertical-align:top;text-align:left}th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}td{color:#dce7f8}
 .up{color:var(--green);font-weight:700}.down{color:var(--red);font-weight:700}.neutral{color:var(--muted);font-weight:700}.reasons,.muted{color:var(--muted)}.empty{color:var(--muted);padding:18px 10px;font-style:italic;text-align:center}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:12px}.legend span{display:inline-flex;align-items:center;gap:6px}.dot{width:10px;height:10px;border-radius:999px;display:inline-block}
@@ -339,6 +531,24 @@ canvas{width:100%!important;height:320px!important}
     </div>
     <div class="badge"><span class="pill">Groq: llama-3.3-70b-versatile</span><span id="status" class="pill">idle</span></div>
   </div>
+
+    <div class="card panel" id="authCard">
+        <div class="row" style="justify-content:space-between;margin-bottom:10px">
+            <div>
+                <h3 style="margin:0">Hesap</h3>
+                <div class="sub">Kendi hesabını oluştur ya da giriş yap. Ayarlar ve watchlist bu hesaba özel kaydedilir.</div>
+            </div>
+            <div id="meStatus" class="pill">oturum yok</div>
+        </div>
+        <div class="settings-grid" style="grid-template-columns:repeat(3,1fr)">
+            <div class="field"><label>Kullanıcı adı</label><input id="auth_username" type="text" autocomplete="username"></div>
+            <div class="field"><label>Şifre</label><input id="auth_password" type="password" autocomplete="current-password"></div>
+            <div class="field"><label>&nbsp;</label><div class="row"><button class="btn good" onclick="registerUser()">Kaydol</button><button class="btn alt" onclick="loginUser()">Giriş Yap</button><button class="btn alt" onclick="logoutUser()">Çıkış</button></div></div>
+        </div>
+        <div id="auth_status" class="sub" style="margin-top:8px"></div>
+    </div>
+
+    <div id="app_shell" style="display:none">
 
   <div class="grid">
     <div class="card stat"><div class="l">Son 30 gün hit rate</div><div id="statHit" class="v">-</div></div>
@@ -366,6 +576,29 @@ canvas{width:100%!important;height:320px!important}
       <div id="progress" class="sub" style="margin-top:10px"></div>
     </div>
 
+        <div class="card panel">
+            <div class="row" style="justify-content:space-between;margin-bottom:6px">
+                <h3 style="margin:0">Uygulama Ayarları</h3>
+                <span class="muted">Model, ağırlıklar ve veri ufku burada değişir</span>
+            </div>
+            <div class="settings-grid">
+                <div class="field"><label>Groq model</label><input id="set_groq_model" type="text"></div>
+                <div class="field"><label>News weight</label><input id="set_news_weight" type="text"></div>
+                <div class="field"><label>Technical weight</label><input id="set_technical_weight" type="text"></div>
+                <div class="field"><label>Neutral band</label><input id="set_neutral_band" type="text"></div>
+                <div class="field"><label>News lookback hours</label><input id="set_news_lookback_hours" type="text"></div>
+                <div class="field"><label>Max articles / symbol</label><input id="set_max_articles_per_symbol" type="text"></div>
+                <div class="field"><label>Max symbols / run</label><input id="set_max_symbols_per_run" type="text"></div>
+                <div class="field"><label>Intraday lookback</label><input id="set_intraday_lookback_period" type="text"></div>
+                <div class="field"><label>Technical lookback</label><input id="set_technical_lookback_period" type="text"></div>
+            </div>
+            <div class="row" style="margin-top:12px;justify-content:flex-end">
+                <button class="btn alt" onclick="loadSettings()">Yenile</button>
+                <button class="btn good" onclick="saveSettings()">Ayarları Kaydet</button>
+            </div>
+            <div id="settings_status" class="sub" style="margin-top:8px"></div>
+        </div>
+
     <div class="card half"><h3 style="margin:0 0 10px">Performans</h3><canvas id="hitChart"></canvas></div>
     <div class="card half"><h3 style="margin:0 0 10px">Model / Zaman Dilimi</h3><canvas id="barChart"></canvas></div>
 
@@ -375,7 +608,9 @@ canvas{width:100%!important;height:320px!important}
 
     <div class="card half"><h3 style="margin:0 0 10px">Watchlist</h3><table><thead><tr><th>Sembol</th><th>Ad</th><th>Sinyal</th><th>Detay</th></tr></thead><tbody id="watchlist"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
     <div class="card half"><h3 style="margin:0 0 10px">Güncel İzleme</h3><table><thead><tr><th>Zaman</th><th>Sembol</th><th>Yön</th><th>İsabet</th></tr></thead><tbody id="history"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
-  </div>
+    </div>
+
+    </div>
 </div>
 
 <script>
@@ -383,6 +618,7 @@ let selected = [];
 let pollTimer = null;
 let hitChart = null;
 let barChart = null;
+let appSettings = {};
 
 function dirClass(d){ return d==='UP' ? 'up' : (d==='DOWN' ? 'down' : 'neutral'); }
 function pct(hit, total){ return total ? Math.round(100 * hit / total) + '%' : '0%'; }
@@ -438,6 +674,70 @@ async function saveWatchlist(){
     });
   }
   loadDashboard();
+}
+
+function editWatchlist(item){
+    const newsSources = (item.sources || 'google').split(',').map(s => s.trim()).filter(Boolean);
+    const existing = selected.find(s => s.symbol === item.symbol);
+    const payload = {
+        symbol: item.symbol,
+        name: item.name || item.symbol,
+        timeframe: item.timeframes || '1d',
+        profile: item.profiles || 'balanced',
+        news_sources: newsSources.length ? newsSources : ['google'],
+    };
+    if (existing){
+        Object.assign(existing, payload);
+    } else {
+        selected.push(payload);
+    }
+    renderChips();
+}
+
+function applySettingsToForm(settings){
+    appSettings = settings;
+    for (const [key, value] of Object.entries(settings)){
+        const input = document.getElementById(`set_${key}`);
+        if (input) input.value = value;
+    }
+}
+
+async function loadSettings(){
+    const r = await fetch('/api/settings');
+    const s = await r.json();
+    applySettingsToForm(s);
+    document.getElementById('settings_status').textContent = 'Ayarlar yüklendi.';
+}
+
+async function saveSettings(){
+    const fallback = (key) => appSettings[key];
+    const numberOrFallback = (value, key) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback(key);
+    };
+    const payload = {
+        groq_model: document.getElementById('set_groq_model').value.trim() || fallback('groq_model'),
+        news_weight: numberOrFallback(document.getElementById('set_news_weight').value, 'news_weight'),
+        technical_weight: numberOrFallback(document.getElementById('set_technical_weight').value, 'technical_weight'),
+        neutral_band: numberOrFallback(document.getElementById('set_neutral_band').value, 'neutral_band'),
+        news_lookback_hours: numberOrFallback(document.getElementById('set_news_lookback_hours').value, 'news_lookback_hours'),
+        max_articles_per_symbol: numberOrFallback(document.getElementById('set_max_articles_per_symbol').value, 'max_articles_per_symbol'),
+        max_symbols_per_run: numberOrFallback(document.getElementById('set_max_symbols_per_run').value, 'max_symbols_per_run'),
+        intraday_lookback_period: document.getElementById('set_intraday_lookback_period').value.trim() || fallback('intraday_lookback_period'),
+        technical_lookback_period: document.getElementById('set_technical_lookback_period').value.trim() || fallback('technical_lookback_period'),
+    };
+    const r = await fetch('/api/settings', {
+        method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload),
+    });
+    if (!r.ok){
+        const err = await r.json().catch(() => ({}));
+        document.getElementById('settings_status').textContent = err.detail || 'Ayarlar kaydedilemedi.';
+        return;
+    }
+    const saved = await r.json();
+    applySettingsToForm(saved);
+    document.getElementById('settings_status').textContent = 'Ayarlar kaydedildi ve aktif edildi.';
+    loadDashboard();
 }
 
 function startPolling(){ if (pollTimer) return; pollTimer = setInterval(refreshState, 1500); refreshState(); }
@@ -506,17 +806,69 @@ async function loadDashboard(){
     options:{ responsive:true, plugins:{ legend:{ labels:{ color:'#e7eefb' } } }, scales:{ y:{ beginAtZero:true, grid:{ color:'rgba(255,255,255,.06)' } }, x:{ grid:{ display:false } } } }
   });
 
-  document.getElementById('watchlist').innerHTML = d.watchlist.length ? d.watchlist.map(w => `<tr><td><b>${w.symbol}</b></td><td>${w.name || ''}</td><td>${w.profiles || ''} / ${w.timeframes || ''}</td><td class="muted">${w.sources || ''}</td></tr>`).join('') : '<tr><td colspan="4" class="empty">Watchlist boş</td></tr>';
+    document.getElementById('watchlist').innerHTML = d.watchlist.length ? d.watchlist.map(w => `<tr><td><b>${w.symbol}</b></td><td>${w.name || ''}</td><td>${w.profiles || ''} / ${w.timeframes || ''}</td><td class="muted">${w.sources || ''} <button class="btn alt" style="padding:6px 10px;margin-left:8px" onclick='editWatchlist(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Seç</button></td></tr>`).join('') : '<tr><td colspan="4" class="empty">Watchlist boş</td></tr>';
 }
 
 async function loadWatchlist(){
   const r = await fetch('/api/watchlist');
   const items = await r.json();
   if (!items.length) return;
-  document.getElementById('watchlist').innerHTML = items.map(w => `<tr><td><b>${w.symbol}</b></td><td>${w.name || ''}</td><td>${w.profiles || ''} / ${w.timeframes || ''}</td><td class="muted">${w.sources || ''}</td></tr>`).join('');
+    document.getElementById('watchlist').innerHTML = items.map(w => `<tr><td><b>${w.symbol}</b></td><td>${w.name || ''}</td><td>${w.profiles || ''} / ${w.timeframes || ''}</td><td class="muted">${w.sources || ''} <button class="btn alt" style="padding:6px 10px;margin-left:8px" onclick='editWatchlist(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Seç</button></td></tr>`).join('');
 }
 
-loadWatchlist();
-loadHistory();
-loadDashboard();
+async function loginUser(){
+    const payload = {username: document.getElementById('auth_username').value, password: document.getElementById('auth_password').value};
+    const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    if (!r.ok){
+        const err = await r.json().catch(() => ({}));
+        document.getElementById('auth_status').textContent = err.detail || 'Giriş başarısız.';
+        return;
+    }
+    document.getElementById('auth_status').textContent = 'Giriş başarılı.';
+    await initializeForSession();
+}
+
+async function registerUser(){
+    const payload = {username: document.getElementById('auth_username').value, password: document.getElementById('auth_password').value};
+    const r = await fetch('/api/register', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    if (!r.ok){
+        const err = await r.json().catch(() => ({}));
+        document.getElementById('auth_status').textContent = err.detail || 'Kayıt başarısız.';
+        return;
+    }
+    document.getElementById('auth_status').textContent = 'Hesap oluşturuldu.';
+    await initializeForSession();
+}
+
+async function logoutUser(){
+    await fetch('/api/logout', {method:'POST'});
+    selected = [];
+    renderChips();
+    document.getElementById('app_shell').style.display = 'none';
+    document.getElementById('meStatus').textContent = 'oturum yok';
+    document.getElementById('auth_status').textContent = 'Çıkış yapıldı.';
+}
+
+async function loadMe(){
+    const r = await fetch('/api/me');
+    if (!r.ok) return null;
+    return await r.json();
+}
+
+async function initializeForSession(){
+    const me = await loadMe();
+    if (!me){
+        document.getElementById('app_shell').style.display = 'none';
+        document.getElementById('meStatus').textContent = 'oturum yok';
+        return;
+    }
+    document.getElementById('meStatus').textContent = `giriş: ${me.username}`;
+    document.getElementById('app_shell').style.display = 'block';
+    await loadSettings();
+    await loadWatchlist();
+    await loadHistory();
+    await loadDashboard();
+}
+
+initializeForSession();
 </script></body></html>"""
