@@ -18,7 +18,7 @@ from .config import Config
 from .models import Prediction
 from .news.fetch import available_sources, fetch_articles
 from .pipeline import load_watchlist, run_for_symbols
-from .screener import list_universes, scan as screener_scan, universe_symbols
+from .screener import list_universes, scan as screener_scan, scan_symbols as screener_scan_symbols, universe_symbols
 from .storage.recorder import PredictionRecorder
 from .symbols_search import search_symbols
 from .technical.data import ALLOWED_TIMEFRAMES, fetch_bars
@@ -439,9 +439,18 @@ def create_app(cfg: Config) -> FastAPI:
     @app.get("/api/screener")
     def api_screener(universe: str = "bist", timeframe: str = "1d",
                      user_id: int = Depends(require_user)) -> JSONResponse:
-        """Technical-only scan of a preset universe, ranked by score. No Groq
-        cost; runs synchronously (a curated ~20-symbol list finishes quickly)."""
+        """Technical scan of a preset universe (or the user's watchlist), ranked
+        by score, with the learned model's P(up) when a model is present. No
+        Groq cost; runs synchronously."""
         current_cfg = _get_runtime(user_id).current_cfg()
+        if universe == "watchlist":
+            recorder = _recorder()
+            try:
+                rows = [dict(r) for r in recorder.list_watchlist(user_id=user_id)]
+            finally:
+                recorder.close()
+            entries = [(r["symbol"], r.get("name") or r["symbol"]) for r in rows]
+            return JSONResponse(screener_scan_symbols(entries, current_cfg, timeframe))
         return JSONResponse(screener_scan(universe, current_cfg, timeframe))
 
     @app.get("/api/news")
@@ -1012,13 +1021,23 @@ details.settings[open] summary::before{transform:rotate(90deg)}
           <button class="btn good" id="scr_go" onclick="runScreener()">Tara</button>
         </div>
       </div>
-      <div class="toggle-group" id="scr_filter" style="margin-bottom:10px">
-        <label class="toggle"><input type="radio" name="scrf" value="all" checked> Tümü</label>
-        <label class="toggle"><input type="radio" name="scrf" value="up"> 🟢 Yükseliş</label>
-        <label class="toggle"><input type="radio" name="scrf" value="down"> 🔴 Düşüş</label>
+      <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px">
+        <div class="toggle-group" id="scr_filter">
+          <label class="toggle"><input type="radio" name="scrf" value="all" checked> Tümü</label>
+          <label class="toggle"><input type="radio" name="scrf" value="up"> 🟢 Yükseliş</label>
+          <label class="toggle"><input type="radio" name="scrf" value="down"> 🔴 Düşüş</label>
+        </div>
+        <div class="row" style="gap:8px;align-items:center">
+          <span class="muted" style="font-size:12px">Sırala:</span>
+          <select id="scr_sort" class="scr-select" onchange="renderScreener()">
+            <option value="score">Teknik skor</option>
+            <option value="model">🤖 Model P↑</option>
+            <option value="rsi">RSI</option>
+          </select>
+        </div>
       </div>
-      <table><thead><tr><th>Sembol</th><th>Ad</th><th>Sinyal</th><th>Teknik Skor</th><th>Fiyat</th><th>RSI</th><th></th></tr></thead>
-      <tbody id="scr_results"><tr><td colspan="7" class="empty">"Tara" butonuna basarak seçili evreni tarayın.</td></tr></tbody></table>
+      <table><thead><tr><th>Sembol</th><th>Ad</th><th>Sinyal</th><th>Teknik</th><th>🤖 Model P↑</th><th>Fiyat</th><th>RSI</th><th></th></tr></thead>
+      <tbody id="scr_results"><tr><td colspan="8" class="empty">"Tara" butonuna basarak seçili evreni tarayın.</td></tr></tbody></table>
       <div id="scr_status" class="sub" style="margin-top:8px"></div>
     </div>
 
@@ -1450,8 +1469,9 @@ async function loadUniverses(){
   try {
     const r = await fetch('/api/screener/universes');
     const list = await r.json();
-    sel.innerHTML = list.map(u => `<option value="${esc(u.id)}">${esc(u.label)} · ${u.count}</option>`).join('');
-  } catch (e) { sel.innerHTML = '<option value="bist">BIST Popüler</option>'; }
+    sel.innerHTML = list.map(u => `<option value="${esc(u.id)}">${esc(u.label)} · ${u.count}</option>`).join('')
+      + '<option value="watchlist">★ Favorilerim</option>';
+  } catch (e) { sel.innerHTML = '<option value="bist">BIST Popüler</option><option value="watchlist">★ Favorilerim</option>'; }
 }
 
 function sigClass(signal){
@@ -1465,28 +1485,41 @@ async function runScreener(){
   const tf = document.getElementById('scr_timeframe').value;
   btn.disabled = true;
   document.getElementById('scr_status').textContent = 'Taranıyor… (birkaç saniye sürebilir)';
-  document.getElementById('scr_results').innerHTML = skeletonRows(7, 6);
+  document.getElementById('scr_results').innerHTML = skeletonRows(8, 6);
   try {
     const r = await fetch(`/api/screener?universe=${encodeURIComponent(universe)}&timeframe=${encodeURIComponent(tf)}`);
     screenerResults = await r.json();
   } catch (e) { screenerResults = []; }
   btn.disabled = false;
+  const hasModel = screenerResults.some(r => r.model_proba != null);
   document.getElementById('scr_status').textContent =
-    screenerResults.length ? `${screenerResults.length} sembol tarandı — teknik skora göre sıralı.` : 'Sonuç alınamadı.';
+    screenerResults.length ? `${screenerResults.length} sembol tarandı.${hasModel ? ' 🤖 Model P↑ = ~3 aylık yükseliş olasılığı.' : ''}` : 'Sonuç alınamadı (bu evren/favori listesi boş olabilir).';
   renderScreener();
 }
 
+function screenerSortValue(){ const el = document.getElementById('scr_sort'); return el ? el.value : 'score'; }
+
 function renderScreener(){
   const f = screenerFilterValue();
-  const rows = screenerResults.filter(r => f === 'all'
+  const sortKey = screenerSortValue();
+  let rows = screenerResults.filter(r => f === 'all'
     || (f === 'up' && r.direction === 'UP') || (f === 'down' && r.direction === 'DOWN'));
+  const keyOf = (r) => sortKey === 'model' ? (r.model_proba == null ? -1 : r.model_proba)
+    : sortKey === 'rsi' ? (r.rsi == null ? -1 : r.rsi) : r.score;
+  rows = rows.slice().sort((a, b) => keyOf(b) - keyOf(a));
   const tb = document.getElementById('scr_results');
-  if (!rows.length){ tb.innerHTML = '<tr><td colspan="7" class="empty">Bu filtrede sonuç yok.</td></tr>'; return; }
+  if (!rows.length){ tb.innerHTML = '<tr><td colspan="8" class="empty">Bu filtrede sonuç yok.</td></tr>'; return; }
+  const modelCell = (r) => {
+    if (r.model_proba == null) return '<span class="muted">—</span>';
+    const col = r.model_proba >= 55 ? 'var(--green)' : (r.model_proba <= 45 ? 'var(--red)' : 'var(--muted)');
+    return `<b style="color:${col}">%${r.model_proba.toFixed(0)}</b>`;
+  };
   tb.innerHTML = rows.map(r => `<tr>
     <td><b>${esc(r.symbol)}</b></td>
     <td class="muted">${esc(r.name || '')}</td>
     <td><span class="sig ${sigClass(r.signal)}">${esc(r.signal)}</span></td>
     <td class="${dirClass(r.direction)}">${r.score >= 0 ? '+' : ''}${r.score.toFixed(2)}</td>
+    <td>${modelCell(r)}</td>
     <td>${formatPrice(r.symbol, r.price)}</td>
     <td>${r.rsi == null ? '—' : r.rsi.toFixed(0)}</td>
     <td><button class="btn alt small" onclick='analyzeFromScreener(${JSON.stringify({symbol:r.symbol, name:r.name}).replace(/'/g, "&#39;")})'>＋ Analiz</button></td>
@@ -1727,18 +1760,27 @@ function techSummaryText(p){
 
 function verdictBanner(p){
   const d = p.final_direction;
-  const nd = softDir(p.news_score, 0.1);
-  const td = softDir(p.technical_score, 0.1);
-  const agree = nd !== 'NEUTRAL' && nd === td;
-  const note = agree ? 'Haber ve teknik taraf aynı yönde — sinyal güçlü.'
-    : (nd === 'NEUTRAL' || td === 'NEUTRAL' ? 'Taraflardan biri nötr — sinyal ılımlı.'
-    : 'Haber ve teknik taraf ayrışıyor — temkinli olun.');
   const conf = Math.round((p.final_confidence || 0) * 100);
+  let txt;
+  if (p.profile === 'learned'){
+    // In learned mode the score IS the model's output: P(up) = (score+1)/2.
+    const pUp = Math.round(((Math.max(-1, Math.min(1, p.final_score)) + 1) / 2) * 100);
+    txt = `🤖 <b>Öğrenen model tahmini (≈3 ay):</b> ${dirLabel(d)} — yükseliş olasılığı <b>%${pUp}</b>.
+      <span class="muted">Haber/teknik alt-skorları aşağıda; model bunları birlikte öğrendi.</span>`;
+  } else {
+    const nd = softDir(p.news_score, 0.1);
+    const td = softDir(p.technical_score, 0.1);
+    const agree = nd !== 'NEUTRAL' && nd === td;
+    const note = agree ? 'Haber ve teknik taraf aynı yönde — sinyal güçlü.'
+      : (nd === 'NEUTRAL' || td === 'NEUTRAL' ? 'Taraflardan biri nötr — sinyal ılımlı.'
+      : 'Haber ve teknik taraf ayrışıyor — temkinli olun.');
+    txt = `Haber tarafı <b>${dirLabel(nd)}</b>, teknik taraf <b>${dirLabel(td)}</b>. ${note}`;
+  }
   return `<div class="verdict ${dirClass(d)}">
     <div class="big ${dirClass(d)}">${dirArrow(d)} ${dirLabel(d)}</div>
-    <div class="txt">Haber tarafı <b>${dirLabel(nd)}</b>, teknik taraf <b>${dirLabel(td)}</b>. ${note}</div>
+    <div class="txt">${txt}</div>
     <div class="conf">
-      <div class="conf-label">Model güveni: %${conf}</div>
+      <div class="conf-label">${p.profile === 'learned' ? 'Model güveni (|eğilim|)' : 'Model güveni'}: %${conf}</div>
       <div class="conf-bar"><i style="width:${conf}%"></i></div>
     </div>
   </div>`;
@@ -1812,7 +1854,7 @@ async function showDetailFor(p, scroll){
     `${p.timeframe} · ${p.profile} · analiz anı fiyatı ${formatPrice(p.symbol, p.price_at_prediction)}`;
   document.getElementById('detailVerdict').innerHTML = verdictBanner(p);
   document.getElementById('detailScores').innerHTML =
-    scoreBadge('Final Skor', p.final_score, p.final_confidence) +
+    scoreBadge(p.profile === 'learned' ? '🤖 Model Skoru' : 'Final Skor', p.final_score, p.final_confidence) +
     scoreBadge('Haber Skoru (AI)', p.news_score, p.news_confidence) +
     scoreBadge('Teknik Skor', p.technical_score, null);
   document.getElementById('detailTechSummary').innerHTML = techSummaryText(p);
@@ -1856,6 +1898,7 @@ async function showDetailFor(p, scroll){
 
   lastChartData = chartData;
   lastChartSym = p.symbol;
+  lastChartTf = p.timeframe || '1d';
   renderDetailChart();
   renderLevels(p.symbol, sm);
   renderTradePlan(p.symbol, sm);
@@ -1874,7 +1917,14 @@ function showLevelsOn(){ const el = document.getElementById('showLevels'); retur
 // TradingView Lightweight Charts — crisp, professional, big.
 let lwChart = null, lwMain = null, lwRsiChart = null;
 
-function lwTime(iso){ return Math.floor(new Date(iso).getTime() / 1000); }
+let lastChartTf = '1d';
+function isIntradayTf(tf){ return tf === '30m' || tf === '1h'; }
+// Daily+ bars use a clean business-day axis; intraday uses timestamps + time.
+function lwTime(iso){
+  const d = new Date(iso);
+  if (isIntradayTf(lastChartTf)) return Math.floor(d.getTime() / 1000);
+  return {year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate()};
+}
 function lwLineData(dates, arr){
   const out = [];
   for (let i = 0; i < arr.length; i++){ if (arr[i] != null) out.push({time: lwTime(dates[i]), value: arr[i]}); }
@@ -1886,9 +1936,14 @@ function lwThemeOpts(el, height){
     layout: {background: {type: 'solid', color: 'transparent'}, textColor: '#a9bcda', fontSize: 12, fontFamily: 'Inter,Segoe UI,sans-serif'},
     grid: {vertLines: {color: 'rgba(255,255,255,.05)'}, horzLines: {color: 'rgba(255,255,255,.08)'}},
     crosshair: {mode: LightweightCharts.CrosshairMode.Normal},
-    rightPriceScale: {borderColor: 'rgba(255,255,255,.14)'},
-    timeScale: {borderColor: 'rgba(255,255,255,.14)', timeVisible: true, secondsVisible: false},
+    rightPriceScale: {borderColor: 'rgba(255,255,255,.14)', scaleMargins: {top: 0.08, bottom: 0.08}},
+    timeScale: {borderColor: 'rgba(255,255,255,.14)', timeVisible: isIntradayTf(lastChartTf), secondsVisible: false, rightOffset: 3, minBarSpacing: 3},
   };
+}
+// Show the most recent ~`show` bars by default (readable), full history scrollable.
+function setLwView(chart, n, show){
+  if (n > show) chart.timeScale().setVisibleLogicalRange({from: n - show, to: n - 1 + 3});
+  else chart.timeScale().fitContent();
 }
 
 function renderDetailChart(){
@@ -1944,19 +1999,22 @@ function renderDetailChart(){
     priceLine(sm.fib['50'], 'rgba(196,132,252,.6)', 'Fib 50', true);
     priceLine(sm.fib['61.8'], 'rgba(196,132,252,.6)', 'Fib 62', true);
   }
-  lwChart.timeScale().fitContent();
+  const n = dates.length, show = Math.min(n, 130);
+  setLwView(lwChart, n, show);
 
   // --- RSI pane ---
-  if (rsiEl){
+  if (rsiEl && (cd.rsi || []).some(v => v != null)){
+    rsiEl.style.display = '';
     lwRsiChart = LightweightCharts.createChart(rsiEl, lwThemeOpts(rsiEl, 190));
     const rsiS = lwRsiChart.addLineSeries({color: '#c084fc', lineWidth: 2, priceLineVisible: false});
-    rsiS.setData(lwLineData(dates, cd.rsi));
+    // Pad warm-up bars with whitespace so the RSI shares the price chart's exact
+    // time domain — this is what fixes the "zoomed-in / half missing" bug.
+    rsiS.setData(dates.map((d, i) => cd.rsi[i] != null ? {time: lwTime(d), value: cd.rsi[i]} : {time: lwTime(d)}));
     rsiS.createPriceLine({price: 70, color: 'rgba(255,107,107,.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70'});
     rsiS.createPriceLine({price: 30, color: 'rgba(49,196,141,.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30'});
-    lwRsiChart.timeScale().fitContent();
-    // keep the two panes' time axes in sync
-    lwChart.timeScale().subscribeVisibleLogicalRangeChange(r => { if (r) lwRsiChart.timeScale().setVisibleLogicalRange(r); });
-    lwRsiChart.timeScale().subscribeVisibleLogicalRangeChange(r => { if (r) lwChart.timeScale().setVisibleLogicalRange(r); });
+    setLwView(lwRsiChart, n, show);
+  } else if (rsiEl){
+    rsiEl.style.display = 'none';
   }
 }
 function redrawDetailChart(){ renderDetailChart(); }

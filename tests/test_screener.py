@@ -51,7 +51,7 @@ def test_scan_ranks_by_score_desc(monkeypatch):
     scores = [r["score"] for r in rows]
     assert scores == sorted(scores, reverse=True)
     assert rows[0]["score"] >= rows[-1]["score"]
-    assert set(rows[0]) == {"symbol", "name", "score", "direction", "signal", "price", "rsi"}
+    assert set(rows[0]) == {"symbol", "name", "score", "direction", "signal", "price", "rsi", "model_proba"}
 
 
 def test_scan_skips_symbols_with_insufficient_history(monkeypatch):

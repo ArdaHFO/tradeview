@@ -92,7 +92,7 @@ def _direction(score: float) -> str:
     return Direction.NEUTRAL.value
 
 
-def _scan_one(symbol: str, name: str, cfg: Config, timeframe: str) -> dict | None:
+def _scan_one(symbol: str, name: str, cfg: Config, timeframe: str, model=None) -> dict | None:
     try:
         bars = fetch_bars(symbol, cfg, timeframe)
     except Exception as exc:
@@ -104,7 +104,7 @@ def _scan_one(symbol: str, name: str, cfg: Config, timeframe: str) -> dict | Non
     closes = [b.close for b in bars]
     rsi_series = rsi(closes, 14)
     rsi_last = next((v for v in reversed(rsi_series) if v is not None), None)
-    return {
+    row = {
         "symbol": symbol,
         "name": name,
         "score": round(verdict.score, 3),
@@ -112,21 +112,37 @@ def _scan_one(symbol: str, name: str, cfg: Config, timeframe: str) -> dict | Non
         "signal": _signal_label(verdict.score),
         "price": round(closes[-1], 2),
         "rsi": round(rsi_last, 1) if rsi_last is not None else None,
+        "model_proba": None,
     }
+    # The learned model's P(up over ~3mo), if a model is available. Screener has
+    # no news, so the news feature is 0 — a technical-only estimate.
+    if model is not None:
+        from .learning.features import features_from_bars, to_vector
+        feat = features_from_bars(bars)
+        if feat is not None:
+            row["model_proba"] = round(model.predict_proba(to_vector(feat)) * 100, 1)
+    return row
 
 
-def scan(universe: str, cfg: Config, timeframe: str = "1d") -> list[dict]:
-    """Score every symbol in the universe technically and rank by score desc
-    (strongest bullish first, strongest bearish last)."""
+def scan_symbols(entries: list[tuple[str, str]], cfg: Config, timeframe: str = "1d") -> list[dict]:
+    """Technically score an explicit (symbol, name) list, ranked by score desc."""
     if timeframe not in ALLOWED_TIMEFRAMES:
         timeframe = "1d"
-    entries = UNIVERSES.get(universe, UNIVERSES["bist"])["symbols"]
+    from .learning.train import load_model
+    model = load_model(cfg.model_path)
     results: list[dict] = []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = [ex.submit(_scan_one, sym, name, cfg, timeframe) for sym, name in entries]
+        futures = [ex.submit(_scan_one, sym, name, cfg, timeframe, model) for sym, name in entries]
         for fut in as_completed(futures):
             row = fut.result()
             if row is not None:
                 results.append(row)
     results.sort(key=lambda r: r["score"], reverse=True)
     return results
+
+
+def scan(universe: str, cfg: Config, timeframe: str = "1d") -> list[dict]:
+    """Score every symbol in a preset universe, ranked by score desc (strongest
+    bullish first, strongest bearish last)."""
+    entries = UNIVERSES.get(universe, UNIVERSES["bist"])["symbols"]
+    return scan_symbols(entries, cfg, timeframe)
