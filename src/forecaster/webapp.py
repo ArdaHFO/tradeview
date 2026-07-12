@@ -731,6 +731,7 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TradeView — Küresel Haber + Teknik Analiz</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 :root{--bg:#07111f;--bg2:#0c1629;--panel:#101b30;--panel2:#13213a;--text:#e7eefb;--muted:#8ea4c7;--line:#223557;--green:#31c48d;--red:#ff6b6b;--amber:#f4b942;--blue:#6ca7ff}
 *{box-sizing:border-box}
@@ -783,7 +784,11 @@ select option{background:#13213a;color:#e7eefb}
 table{width:100%;border-collapse:collapse}th,td{padding:11px 10px;border-bottom:1px solid rgba(255,255,255,.06);vertical-align:top;text-align:left}th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}td{color:#dce7f8}
 .up{color:var(--green);font-weight:700}.down{color:var(--red);font-weight:700}.neutral{color:var(--muted);font-weight:700}.reasons,.muted{color:var(--muted)}.empty{color:var(--muted);padding:18px 10px;font-style:italic;text-align:center}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:12px}.legend span{display:inline-flex;align-items:center;gap:6px}.dot{width:10px;height:10px;border-radius:999px;display:inline-block}
-canvas{width:100%!important;height:320px!important}
+canvas{width:100%!important;height:340px!important}
+/* TradingView Lightweight Charts containers */
+.lwc{width:100%;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:rgba(255,255,255,.015)}
+#lwPrice{height:460px}#lwRsi{height:190px;margin-top:6px}
+@media (max-width:700px){#lwPrice{height:360px}}
 .row-clickable{cursor:pointer}
 .row-clickable:hover td{background:rgba(255,255,255,.03)}
 .skel{background:linear-gradient(90deg, rgba(255,255,255,.04) 25%, rgba(255,255,255,.09) 37%, rgba(255,255,255,.04) 63%);background-size:400% 100%;animation:skel 1.4s ease infinite;border-radius:8px;height:14px}
@@ -1037,12 +1042,12 @@ details.settings[open] summary::before{transform:rotate(90deg)}
             <div id="settings_status" class="sub" style="margin-top:8px"></div>
         </details>
 
-    <div class="card half" data-tab="panom">
+    <div class="card panel" data-tab="panom">
       <h3 style="margin:0 0 10px">📈 Performans — Kümülatif İsabet Oranı</h3>
       <div id="hitEmpty" class="chart-empty is-hidden">Henüz sonuçlanmış tahmin yok. Analiz yaptıkça ve tahminler ertesi kapanışla eşleştikçe isabet eğrin burada oluşur.</div>
       <canvas id="hitChart"></canvas>
     </div>
-    <div class="card half" data-tab="panom">
+    <div class="card panel" data-tab="panom">
       <h3 style="margin:0 0 10px">📊 Profil / Zaman Dilimi Bazında İsabet</h3>
       <div id="barEmpty" class="chart-empty is-hidden">Profil ve zaman dilimi bazında isabet oranları, yeterli sonuçlanmış tahmin biriktiğinde görünür.</div>
       <canvas id="barChart"></canvas>
@@ -1087,15 +1092,16 @@ details.settings[open] summary::before{transform:rotate(90deg)}
         <label class="toggle"><input type="radio" name="charttype" value="candle" onchange="redrawDetailChart()"> Mum</label>
         <label class="toggle"><input type="checkbox" id="showLevels" onchange="redrawDetailChart()"> Pivot/Fibonacci çizgileri</label>
       </div>
-      <canvas id="detailChartCanvas"></canvas>
+      <div id="lwPrice" class="lwc"></div>
+
+      <div class="section-title">📉 RSI (14) — Momentum <span class="muted" style="font-weight:400;font-size:12px">— 70 üzeri aşırı alım, 30 altı aşırı satım</span></div>
+      <div id="lwRsi" class="lwc"></div>
+
       <div class="section-title" style="margin-top:14px">📐 Önemli Seviyeler <span class="muted" style="font-weight:400;font-size:12px">— pivot (son bar) ve Fibonacci geri çekilme</span></div>
       <div id="detailLevels"></div>
 
       <div class="section-title" style="margin-top:14px">🎯 İşlem Planı — Nereden Al, Nereden Sat <span class="muted" style="font-weight:400;font-size:12px">— destek/direnç · pivot · Fibonacci seviyelerinden üretildi</span></div>
       <div id="detailPlan"></div>
-
-      <div class="section-title">📉 RSI (14) — Momentum <span class="muted" style="font-weight:400;font-size:12px">— 70 üzeri aşırı alım, 30 altı aşırı satım</span></div>
-      <canvas id="detailRsiCanvas" style="height:170px!important"></canvas>
 
       <div class="section-title">🧮 Teknik Göstergeler</div>
       <div id="detailTechSummary"></div>
@@ -1121,6 +1127,18 @@ let pollTimer = null;
 let hitChart = null;
 let barChart = null;
 let appSettings = {};
+
+// Make Chart.js legible on the dark theme (bigger, brighter, point-style legends).
+if (window.Chart){
+  Chart.defaults.color = '#c9d6ea';
+  Chart.defaults.font.size = 13;
+  Chart.defaults.font.family = 'Inter, Segoe UI, sans-serif';
+  Chart.defaults.plugins.legend.labels.usePointStyle = true;
+  Chart.defaults.plugins.legend.labels.boxWidth = 8;
+  Chart.defaults.plugins.tooltip.titleFont = {size: 13};
+  Chart.defaults.plugins.tooltip.bodyFont = {size: 13};
+  Chart.defaults.plugins.tooltip.padding = 10;
+}
 
 function dirClass(d){ return d==='UP' ? 'up' : (d==='DOWN' ? 'down' : 'neutral'); }
 function dirLabel(d){ return d==='UP' ? 'YÜKSELİŞ' : (d==='DOWN' ? 'DÜŞÜŞ' : 'NÖTR'); }
@@ -1397,7 +1415,8 @@ function showTab(name){
   document.querySelectorAll('[data-tab]').forEach(el => el.classList.toggle('tabhide', el.dataset.tab !== name));
   // A chart drawn while its tab was hidden has zero size — resize on reveal.
   requestAnimationFrame(() => {
-    [hitChart, barChart, compareChart, detailChart, rsiChart].forEach(c => { if (c) c.resize(); });
+    [hitChart, barChart, compareChart].forEach(c => { if (c) c.resize(); });
+    resizeLwCharts();
   });
 }
 
@@ -1746,8 +1765,6 @@ function positionBar(sym, sm){
     <div class="muted" style="font-size:12px;margin-top:8px">🟢 Yakın destek: <b>${formatPrice(sym, sm.support)}</b> &nbsp;·&nbsp; 🔴 Yakın direnç: <b>${formatPrice(sym, sm.resistance)}</b></div>`;
 }
 
-let detailChart = null;
-let rsiChart = null;
 let currentDetailIdx = -1;
 
 function highlightResultRow(idx){
@@ -1842,20 +1859,6 @@ async function showDetailFor(p, scroll){
   renderDetailChart();
   renderLevels(p.symbol, sm);
   renderTradePlan(p.symbol, sm);
-
-  const labels = (chartData.dates || []).map(d => new Date(d).toLocaleDateString('tr-TR'));
-  const n = (chartData.close || []).length;
-  const constLine = (v) => Array(n).fill(v);
-  rsiChart = chartOrUpdate(rsiChart, document.getElementById('detailRsiCanvas'), {
-    type: 'line',
-    data: { labels, datasets: [
-      {label:'RSI', data:chartData.rsi, borderColor:'#c084fc', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:2},
-      {label:'70', data:constLine(70), borderColor:'rgba(255,107,107,.5)', pointRadius:0, borderWidth:1, borderDash:[5,4]},
-      {label:'30', data:constLine(30), borderColor:'rgba(49,196,141,.5)', pointRadius:0, borderWidth:1, borderDash:[5,4]},
-    ]},
-    options: { responsive:true, plugins:{legend:{display:false}},
-      scales:{ y:{min:0, max:100, ticks:{stepSize:25, color:'#8ea4c7'}, grid:{color:'rgba(255,255,255,.06)'} }, x:{ grid:{display:false}, ticks:{maxTicksLimit:8} } } },
-  });
 }
 
 // ---- Detail price chart: line/candle + optional pivot/Fibonacci overlays ----
@@ -1868,55 +1871,101 @@ function chartTypeIsCandle(){
 }
 function showLevelsOn(){ const el = document.getElementById('showLevels'); return el && el.checked; }
 
-function buildPriceDatasets(cd){
-  const n = (cd.close || []).length;
-  const constLine = (v) => Array(n).fill(v);
-  const sm = cd.summary || {};
-  const ds = [];
-  if (chartTypeIsCandle() && cd.open && cd.high && cd.low){
-    const wick = [], body = [], colors = [];
-    for (let i = 0; i < n; i++){
-      const o = cd.open[i], h = cd.high[i], l = cd.low[i], c = cd.close[i];
-      wick.push([l, h]);
-      body.push([Math.min(o, c), Math.max(o, c)]);
-      colors.push(c >= o ? 'rgba(49,196,141,.9)' : 'rgba(255,107,107,.9)');
-    }
-    ds.push({type:'bar', label:'Fitil', data:wick, backgroundColor:'rgba(142,164,199,.55)', barPercentage:0.12, categoryPercentage:0.95, grouped:false, order:3});
-    ds.push({type:'bar', label:'Mum', data:body, backgroundColor:colors, barPercentage:0.6, categoryPercentage:0.95, grouped:false, order:2});
-  } else {
-    ds.push({type:'line', label:'Kapanış', data:cd.close, borderColor:'#6ca7ff', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:2, order:1});
-  }
-  ds.push({type:'line', label:'SMA50', data:cd.sma50, borderColor:'#f4b942', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:1, order:0});
-  ds.push({type:'line', label:'SMA200', data:cd.sma200, borderColor:'#ff6b6b', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:1, order:0});
-  ds.push({type:'line', label:'EMA20', data:cd.ema20, borderColor:'#31c48d', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:1, order:0});
-  ds.push({type:'line', label:'Bollinger Üst', data:cd.bb_upper, borderColor:'rgba(142,164,199,.5)', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:1, borderDash:[4,4], order:0});
-  ds.push({type:'line', label:'Bollinger Alt', data:cd.bb_lower, borderColor:'rgba(142,164,199,.5)', backgroundColor:'transparent', tension:.15, pointRadius:0, borderWidth:1, borderDash:[4,4], order:0});
-  if (sm.support != null) ds.push({type:'line', label:'Destek', data:constLine(sm.support), borderColor:'rgba(49,196,141,.7)', pointRadius:0, borderWidth:1.5, borderDash:[6,4], order:0});
-  if (sm.resistance != null) ds.push({type:'line', label:'Direnç', data:constLine(sm.resistance), borderColor:'rgba(255,107,107,.7)', pointRadius:0, borderWidth:1.5, borderDash:[6,4], order:0});
-  if (showLevelsOn()){
-    if (sm.pivot) [['P',sm.pivot.p],['R1',sm.pivot.r1],['R2',sm.pivot.r2],['S1',sm.pivot.s1],['S2',sm.pivot.s2]].forEach(([k,v]) => {
-      if (v != null) ds.push({type:'line', label:'lvl P·'+k, data:constLine(v), borderColor:'rgba(108,167,255,.45)', pointRadius:0, borderWidth:1, order:0});
-    });
-    if (sm.fib) [['38.2',sm.fib['38.2']],['50',sm.fib['50']],['61.8',sm.fib['61.8']]].forEach(([k,v]) => {
-      if (v != null) ds.push({type:'line', label:'lvl Fib·'+k, data:constLine(v), borderColor:'rgba(196,132,252,.5)', pointRadius:0, borderWidth:1, borderDash:[2,3], order:0});
-    });
-  }
-  return ds;
+// TradingView Lightweight Charts — crisp, professional, big.
+let lwChart = null, lwMain = null, lwRsiChart = null;
+
+function lwTime(iso){ return Math.floor(new Date(iso).getTime() / 1000); }
+function lwLineData(dates, arr){
+  const out = [];
+  for (let i = 0; i < arr.length; i++){ if (arr[i] != null) out.push({time: lwTime(dates[i]), value: arr[i]}); }
+  return out;
+}
+function lwThemeOpts(el, height){
+  return {
+    width: el.clientWidth, height,
+    layout: {background: {type: 'solid', color: 'transparent'}, textColor: '#a9bcda', fontSize: 12, fontFamily: 'Inter,Segoe UI,sans-serif'},
+    grid: {vertLines: {color: 'rgba(255,255,255,.05)'}, horzLines: {color: 'rgba(255,255,255,.08)'}},
+    crosshair: {mode: LightweightCharts.CrosshairMode.Normal},
+    rightPriceScale: {borderColor: 'rgba(255,255,255,.14)'},
+    timeScale: {borderColor: 'rgba(255,255,255,.14)', timeVisible: true, secondsVisible: false},
+  };
 }
 
 function renderDetailChart(){
   if (!lastChartData) return;
-  const cd = lastChartData;
-  const labels = (cd.dates || []).map(d => new Date(d).toLocaleDateString('tr-TR'));
-  detailChart = chartOrUpdate(detailChart, document.getElementById('detailChartCanvas'), {
-    type: 'bar',
-    data: { labels, datasets: buildPriceDatasets(cd) },
-    options: { responsive:true, interaction:{mode:'index', intersect:false},
-      plugins:{ legend:{labels:{color:'#e7eefb', boxWidth:12, filter:(it) => !/^lvl /.test(it.text)}} },
-      scales:{ y:{ grid:{color:'rgba(255,255,255,.06)'} }, x:{ grid:{display:false}, ticks:{maxTicksLimit:8} } } },
-  });
+  const cd = lastChartData, sm = cd.summary || {}, dates = cd.dates || [];
+  const priceEl = document.getElementById('lwPrice'), rsiEl = document.getElementById('lwRsi');
+  if (typeof LightweightCharts === 'undefined' || !priceEl){
+    if (priceEl) priceEl.innerHTML = '<div class="chart-empty">Grafik kütüphanesi yüklenemedi.</div>';
+    return;
+  }
+  if (lwChart){ lwChart.remove(); lwChart = null; }
+  if (lwRsiChart){ lwRsiChart.remove(); lwRsiChart = null; }
+
+  // --- price pane ---
+  lwChart = LightweightCharts.createChart(priceEl, lwThemeOpts(priceEl, 460));
+  if (chartTypeIsCandle() && cd.open && cd.high && cd.low){
+    lwMain = lwChart.addCandlestickSeries({upColor: '#31c48d', downColor: '#ff6b6b', borderVisible: false, wickUpColor: '#31c48d', wickDownColor: '#ff6b6b'});
+    lwMain.setData(dates.map((d, i) => ({time: lwTime(d), open: cd.open[i], high: cd.high[i], low: cd.low[i], close: cd.close[i]})));
+  } else {
+    lwMain = lwChart.addAreaSeries({lineColor: '#6ca7ff', topColor: 'rgba(108,167,255,.35)', bottomColor: 'rgba(108,167,255,0)', lineWidth: 2});
+    lwMain.setData(lwLineData(dates, cd.close));
+  }
+  const overlay = (arr, color, w) => {
+    if (!arr) return;
+    const s = lwChart.addLineSeries({color, lineWidth: w, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
+    s.setData(lwLineData(dates, arr));
+  };
+  overlay(cd.sma50, '#f4b942', 2);
+  overlay(cd.sma200, '#ff6b6b', 2);
+  overlay(cd.ema20, '#31c48d', 1);
+  overlay(cd.bb_upper, 'rgba(142,164,199,.5)', 1);
+  overlay(cd.bb_lower, 'rgba(142,164,199,.5)', 1);
+  // volume histogram, tucked into the bottom 18%
+  if (cd.volume){
+    const vol = lwChart.addHistogramSeries({priceScaleId: 'vol', priceFormat: {type: 'volume'}, priceLineVisible: false, lastValueVisible: false});
+    lwChart.priceScale('vol').applyOptions({scaleMargins: {top: 0.82, bottom: 0}});
+    vol.setData(dates.map((d, i) => ({time: lwTime(d), value: cd.volume[i] || 0, color: cd.close[i] >= cd.open[i] ? 'rgba(49,196,141,.35)' : 'rgba(255,107,107,.35)'})));
+  }
+  // level lines (support/resistance always; pivot/fib when toggled)
+  const priceLine = (price, color, title, dashed) => {
+    if (price == null || !isFinite(price)) return;
+    lwMain.createPriceLine({price, color, lineWidth: 1, lineStyle: dashed ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title});
+  };
+  priceLine(sm.support, '#31c48d', 'Destek');
+  priceLine(sm.resistance, '#ff6b6b', 'Direnç');
+  if (showLevelsOn() && sm.pivot){
+    priceLine(sm.pivot.p, 'rgba(108,167,255,.75)', 'P', true);
+    priceLine(sm.pivot.r1, 'rgba(108,167,255,.5)', 'R1', true);
+    priceLine(sm.pivot.s1, 'rgba(108,167,255,.5)', 'S1', true);
+  }
+  if (showLevelsOn() && sm.fib){
+    priceLine(sm.fib['38.2'], 'rgba(196,132,252,.6)', 'Fib 38', true);
+    priceLine(sm.fib['50'], 'rgba(196,132,252,.6)', 'Fib 50', true);
+    priceLine(sm.fib['61.8'], 'rgba(196,132,252,.6)', 'Fib 62', true);
+  }
+  lwChart.timeScale().fitContent();
+
+  // --- RSI pane ---
+  if (rsiEl){
+    lwRsiChart = LightweightCharts.createChart(rsiEl, lwThemeOpts(rsiEl, 190));
+    const rsiS = lwRsiChart.addLineSeries({color: '#c084fc', lineWidth: 2, priceLineVisible: false});
+    rsiS.setData(lwLineData(dates, cd.rsi));
+    rsiS.createPriceLine({price: 70, color: 'rgba(255,107,107,.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70'});
+    rsiS.createPriceLine({price: 30, color: 'rgba(49,196,141,.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30'});
+    lwRsiChart.timeScale().fitContent();
+    // keep the two panes' time axes in sync
+    lwChart.timeScale().subscribeVisibleLogicalRangeChange(r => { if (r) lwRsiChart.timeScale().setVisibleLogicalRange(r); });
+    lwRsiChart.timeScale().subscribeVisibleLogicalRangeChange(r => { if (r) lwChart.timeScale().setVisibleLogicalRange(r); });
+  }
 }
 function redrawDetailChart(){ renderDetailChart(); }
+function resizeLwCharts(){
+  const p = document.getElementById('lwPrice'), r = document.getElementById('lwRsi');
+  if (lwChart && p && p.clientWidth) lwChart.applyOptions({width: p.clientWidth});
+  if (lwRsiChart && r && r.clientWidth) lwRsiChart.applyOptions({width: r.clientWidth});
+}
+window.addEventListener('resize', resizeLwCharts);
 
 function lvlCell(k, v, sym){ return `<div class="lv"><div class="k">${esc(k)}</div><div class="v">${formatPrice(sym, v)}</div></div>`; }
 function renderLevels(sym, sm){
