@@ -448,7 +448,10 @@ def create_app(cfg: Config) -> FastAPI:
         """Raw article list for a symbol — no AI scoring, no Groq cost."""
         current_cfg = _get_runtime(user_id).current_cfg()
         source_list = [s.strip() for s in sources.split(",") if s.strip()]
-        articles = fetch_articles(symbol, name or None, current_cfg, source_list)
+        # This is the reader-facing article list, so ask fetch to widen the
+        # window until it fills up (rather than stopping at the first recent hit).
+        articles = fetch_articles(symbol, name or None, current_cfg, source_list,
+                                  min_articles=current_cfg.max_articles_per_symbol)
         return JSONResponse([
             {
                 "title": a.title, "source": a.source, "url": a.url,

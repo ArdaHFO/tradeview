@@ -370,15 +370,21 @@ def available_sources(cfg: Config) -> list[dict]:
 
 
 def fetch_articles(symbol: str, company_name: str | None, cfg: Config,
-                    sources: list[str] | None = None) -> list[NewsArticle]:
+                    sources: list[str] | None = None, min_articles: int = 1) -> list[NewsArticle]:
     """Fetch recent, deduplicated news articles for a symbol from one or more sources.
 
-    Retries with a wider lookback window if the configured one turns up
-    nothing — low-newsflow and internationally-listed stocks don't always
-    have news in the last 24-72h even when older coverage exists.
+    Widens the lookback window (cfg → 7d → 30d) until it has gathered at least
+    `min_articles`, keeping the largest set found. A wider window is a superset
+    in time, so this both rescues low-newsflow / internationally-listed stocks
+    that have nothing in the last 24-72h AND fills the list when the default
+    window only happens to hold one or two items. `min_articles=1` (the AI
+    scoring path) keeps the old recency-first behaviour; the article-list view
+    asks for more so the reader sees the fuller picture.
     """
     selected_sources = _normalize_sources(sources)
 
+    best: list[NewsArticle] = []
+    best_step: int | None = None
     for step in _WIDEN_STEPS_HOURS:
         lookback_hours = _effective_lookback_hours(cfg) if step is None else step
         seen_titles: list[str] = []
@@ -393,13 +399,18 @@ def fetch_articles(symbol: str, company_name: str | None, cfg: Config,
             elif source == "newsapi":
                 articles.extend(_fetch_newsapi_articles(symbol, company_name, cfg, seen_titles, lookback_hours))
 
-        if articles:
-            articles.sort(key=lambda article: article.published_ts, reverse=True)
-            articles = articles[:cfg.max_articles_per_symbol]
-            if step is not None:
-                log.info("news fetch: %s found results only after widening lookback to %dh", symbol, step)
-            log.info("news fetch: %s -> %d articles (lookback=%dh)", symbol, len(articles), lookback_hours)
-            return articles
+        if len(articles) > len(best):
+            best, best_step = articles, step
+        if len(best) >= min_articles:
+            break
+
+    if best:
+        best.sort(key=lambda article: article.published_ts, reverse=True)
+        best = best[:cfg.max_articles_per_symbol]
+        if best_step is not None:
+            log.info("news fetch: %s widened lookback to %dh to gather %d articles", symbol, best_step, len(best))
+        log.info("news fetch: %s -> %d articles", symbol, len(best))
+        return best
 
     log.info("news fetch: %s -> 0 articles even after widening to 30 days", symbol)
     return []
