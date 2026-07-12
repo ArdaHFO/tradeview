@@ -107,8 +107,8 @@ def test_out_of_range_score_and_confidence_are_clamped(monkeypatch):
 
 
 def test_unexpected_shape_returns_unavailable_instead_of_crashing(monkeypatch):
-    # Valid JSON, but missing the required "direction" key.
-    payload = json.dumps({"score": 0.5, "confidence": 0.5})
+    # Valid JSON, but missing the required "score" field.
+    payload = json.dumps({"direction": "up", "confidence": 0.5})
 
     class FakeClient:
         def __init__(self, api_key):
@@ -118,3 +118,45 @@ def test_unexpected_shape_returns_unavailable_instead_of_crashing(monkeypatch):
     verdict = sentiment.analyze_news("AAPL", [_article()], _cfg())
     assert verdict.direction == Direction.NEUTRAL
     assert "NEWS_UNAVAILABLE" in verdict.rationale
+
+
+def test_direction_is_derived_from_score(monkeypatch):
+    # Model contradicts itself (says "up" but scores bearish); the score wins so
+    # direction and score can never disagree downstream.
+    payload = json.dumps({"direction": "up", "score": -0.7, "confidence": 0.6,
+                          "key_drivers": ["guidance cut"], "rationale": "lowered outlook"})
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: _fake_response("end_turn", payload)))
+
+    monkeypatch.setattr(sentiment.groq, "Groq", FakeClient)
+    verdict = sentiment.analyze_news("AAPL", [_article()], _cfg())
+    assert verdict.direction == Direction.DOWN
+    assert verdict.score == -0.7
+
+
+def test_json_extraction_tolerates_surrounding_prose(monkeypatch):
+    payload = 'Here is my analysis:\n{"score": 0.4, "confidence": 0.55, "rationale": "ok"}\nThanks!'
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: _fake_response("end_turn", payload)))
+
+    monkeypatch.setattr(sentiment.groq, "Groq", FakeClient)
+    verdict = sentiment.analyze_news("AAPL", [_article()], _cfg())
+    assert verdict.direction == Direction.UP
+    assert verdict.score == 0.4
+    assert verdict.confidence == 0.55
+
+
+def test_near_zero_score_is_neutral(monkeypatch):
+    payload = json.dumps({"score": 0.05, "confidence": 0.3, "rationale": "immaterial"})
+
+    class FakeClient:
+        def __init__(self, api_key):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=lambda **kw: _fake_response("end_turn", payload)))
+
+    monkeypatch.setattr(sentiment.groq, "Groq", FakeClient)
+    verdict = sentiment.analyze_news("AAPL", [_article()], _cfg())
+    assert verdict.direction == Direction.NEUTRAL
