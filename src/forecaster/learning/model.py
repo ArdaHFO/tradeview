@@ -95,6 +95,12 @@ class LogisticRegression:
         xs = self._z(x)
         return _sigmoid(self.bias + sum(self.weights[j] * xs[j] for j in range(len(xs))))
 
+    def predict_from_dict(self, features: dict) -> float:
+        """Predict from a feature dict, mapping BY NAME onto this model's own
+        feature order — a model trained on fewer/different features than the
+        current FEATURE_NAMES keeps working (missing features default to 0)."""
+        return self.predict_proba([float(features.get(name, 0.0)) for name in self.feature_names])
+
     # -- persistence ------------------------------------------------------
     def to_dict(self) -> dict:
         return {

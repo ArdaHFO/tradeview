@@ -478,6 +478,12 @@ class PredictionRecorder:
         cur = self._execute("SELECT * FROM user_watchlist WHERE user_id = ? ORDER BY symbol ASC", (scoped_user_id,))
         return cur.fetchall()
 
+    def delete_watchlist(self, symbol: str, user_id: int | None = None) -> None:
+        scoped_user_id = self._scope_user_id(user_id)
+        self._execute("DELETE FROM user_watchlist WHERE user_id = ? AND symbol = ?",
+                      (scoped_user_id, symbol.upper()))
+        self._conn.commit()
+
     def record_comparison(self, *, ts: str, symbol: str, profile: str, timeframe: str,
                           news_score: float, technical_score: float, final_score: float,
                           final_direction: str, final_confidence: float,

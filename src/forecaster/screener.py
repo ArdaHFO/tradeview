@@ -92,7 +92,8 @@ def _direction(score: float) -> str:
     return Direction.NEUTRAL.value
 
 
-def _scan_one(symbol: str, name: str, cfg: Config, timeframe: str, model=None) -> dict | None:
+def _scan_one(symbol: str, name: str, cfg: Config, timeframe: str, model=None,
+              market_cache: dict | None = None) -> dict | None:
     try:
         bars = fetch_bars(symbol, cfg, timeframe)
     except Exception as exc:
@@ -117,10 +118,11 @@ def _scan_one(symbol: str, name: str, cfg: Config, timeframe: str, model=None) -
     # The learned model's P(up over ~3mo), if a model is available. Screener has
     # no news, so the news feature is 0 — a technical-only estimate.
     if model is not None:
-        from .learning.features import features_from_bars, to_vector
-        feat = features_from_bars(bars)
+        from .learning.features import features_from_bars, market_index_for
+        market_bars = (market_cache or {}).get(market_index_for(symbol))
+        feat = features_from_bars(bars, market_bars=market_bars)
         if feat is not None:
-            row["model_proba"] = round(model.predict_proba(to_vector(feat)) * 100, 1)
+            row["model_proba"] = round(model.predict_from_dict(feat) * 100, 1)
     return row
 
 
@@ -128,11 +130,22 @@ def scan_symbols(entries: list[tuple[str, str]], cfg: Config, timeframe: str = "
     """Technically score an explicit (symbol, name) list, ranked by score desc."""
     if timeframe not in ALLOWED_TIMEFRAMES:
         timeframe = "1d"
+    from .learning.features import market_index_for
     from .learning.train import load_model
     model = load_model(cfg.model_path)
+    # One index fetch per market so every symbol gets regime features cheaply.
+    market_cache: dict[str, list] = {}
+    if model is not None:
+        for index in {market_index_for(sym) for sym, _ in entries}:
+            try:
+                market_cache[index] = fetch_bars(index, cfg, timeframe)
+            except Exception as exc:
+                log.warning("screener: market index fetch failed for %s: %s", index, exc)
+                market_cache[index] = []
     results: list[dict] = []
     with ThreadPoolExecutor(max_workers=8) as ex:
-        futures = [ex.submit(_scan_one, sym, name, cfg, timeframe, model) for sym, name in entries]
+        futures = [ex.submit(_scan_one, sym, name, cfg, timeframe, model, market_cache)
+                   for sym, name in entries]
         for fut in as_completed(futures):
             row = fut.result()
             if row is not None:

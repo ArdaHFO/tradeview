@@ -20,45 +20,90 @@ log = logging.getLogger(__name__)
 _TREND_IDX = FEATURE_NAMES.index("trend_sma")
 
 
-def _split(dataset, test_frac: float, embargo: int):
+def _split(dataset, test_frac: float, embargo: int, val_frac: float = 0.0):
     """Chronological per-symbol split, then concatenate. No look-ahead.
 
-    An `embargo` gap (= the label horizon) is purged between train and test so
+    An `embargo` gap (= the label horizon) is purged between the segments so
     that training labels — which peek `horizon` bars ahead — never depend on
-    prices that fall inside the test period (purged walk-forward).
+    prices inside the later segment (purged walk-forward). With `val_frac`,
+    carve a validation slice out of the *end* of the train segment for
+    hyper-parameter selection.
     """
     Xtr: list[list[float]] = []
     ytr: list[int] = []
+    Xval: list[list[float]] = []
+    yval: list[int] = []
     Xte: list[list[float]] = []
     yte: list[int] = []
     for _symbol, (X, y) in dataset.items():
         cut = int(len(X) * (1 - test_frac))
         train_end = max(0, cut - embargo)
-        Xtr += X[:train_end]; ytr += y[:train_end]
+        if val_frac > 0:
+            val_cut = int(train_end * (1 - val_frac))
+            fit_end = max(0, val_cut - embargo)
+            Xtr += X[:fit_end]; ytr += y[:fit_end]
+            Xval += X[val_cut:train_end]; yval += y[val_cut:train_end]
+        else:
+            Xtr += X[:train_end]; ytr += y[:train_end]
         Xte += X[cut:]; yte += y[cut:]
-    return Xtr, ytr, Xte, yte
+    return Xtr, ytr, Xval, yval, Xte, yte
+
+
+def _selective_bands(yte: list[int], p_model: list[float]) -> list[dict]:
+    """Accuracy when acting only on higher-conviction signals (|P-0.5| >= t).
+
+    This is how the model is meant to be used professionally: fewer, better
+    signals. Coverage tells you how often it speaks at that bar."""
+    bands = []
+    for t in (0.0, 0.05, 0.10, 0.15, 0.20):
+        idx = [i for i, p in enumerate(p_model) if abs(p - 0.5) >= t]
+        if not idx:
+            continue
+        sel_y = [yte[i] for i in idx]
+        sel_p = [p_model[i] for i in idx]
+        bands.append({
+            "min_conviction": t,
+            "coverage": round(len(idx) / len(p_model), 3),
+            "accuracy": round(accuracy(sel_y, sel_p), 4),
+            "n": len(idx),
+        })
+    return bands
 
 
 def train_and_evaluate(symbols: list[str], cfg: Config, timeframe: str = "1d",
                        horizon: int = 60, test_frac: float = 0.3,
                        save_path: str | None = None) -> tuple[LogisticRegression | None, dict]:
     dataset = build_backtest_dataset(symbols, cfg, timeframe, horizon=horizon)
-    Xtr, ytr, Xte, yte = _split(dataset, test_frac, embargo=horizon)
+    Xtr, ytr, Xval, yval, Xte, yte = _split(dataset, test_frac, embargo=horizon, val_frac=0.15)
     if len(Xtr) < 50 or len(Xte) < 20:
         return None, {"error": "not enough data to train/evaluate",
                       "n_train": len(Xtr), "n_test": len(Xte)}
 
-    model = LogisticRegression(FEATURE_NAMES, l2=0.02, epochs=600).fit(Xtr, ytr)
+    # Small, honest hyper-parameter search: pick L2 by validation AUC (a slice
+    # of the train timeline — the test period stays untouched).
+    best_l2, best_val_auc = 0.02, -1.0
+    if len(Xval) >= 50:
+        for l2 in (0.005, 0.02, 0.08):
+            cand = LogisticRegression(FEATURE_NAMES, l2=l2, epochs=600).fit(Xtr, ytr)
+            val_auc = auc(yval, [cand.predict_proba(x) for x in Xval])
+            if val_auc > best_val_auc:
+                best_l2, best_val_auc = l2, val_auc
+
+    # Refit on the full train window (train + validation) with the chosen L2.
+    Xfit, yfit = Xtr + Xval, ytr + yval
+    model = LogisticRegression(FEATURE_NAMES, l2=best_l2, epochs=600).fit(Xfit, yfit)
     p_model = [model.predict_proba(x) for x in Xte]
-    # Baseline: follow the long-term trend (up if SMA50 > SMA200), the kind of
-    # rule the hand-tuned scorer leans on. The model has to beat this to ship.
+    # Baselines the model has to justify itself against: the long-term trend
+    # rule (what the hand-tuned scorer leans on) and always-up (the base rate).
     p_base = [1.0 if x[_TREND_IDX] > 0 else 0.0 for x in Xte]
+    p_up = [1.0] * len(yte)
 
     report = {
         "symbols": len(dataset),
         "horizon": horizon,
-        "n_train": len(Xtr),
+        "n_train": len(Xfit),
         "n_test": len(Xte),
+        "l2": best_l2,
         "positive_rate_test": round(sum(yte) / len(yte), 3),
         "model": {
             "accuracy": round(accuracy(yte, p_model), 4),
@@ -66,6 +111,8 @@ def train_and_evaluate(symbols: list[str], cfg: Config, timeframe: str = "1d",
             "brier": round(brier(yte, p_model), 4),
         },
         "baseline_trend": {"accuracy": round(accuracy(yte, p_base), 4)},
+        "baseline_always_up": {"accuracy": round(accuracy(yte, p_up), 4)},
+        "selective": _selective_bands(yte, p_model),
         "weights": {name: round(w, 4) for name, w in zip(FEATURE_NAMES, model.weights)},
         "calibration": calibration(yte, p_model, bins=10),
     }
@@ -85,6 +132,8 @@ def train_and_evaluate(symbols: list[str], cfg: Config, timeframe: str = "1d",
         "auc": report["model"]["auc"],
         "brier": report["model"]["brier"],
         "baseline_accuracy": report["baseline_trend"]["accuracy"],
+        "base_rate": report["baseline_always_up"]["accuracy"],
+        "selective": report["selective"],
         "weights": report["weights"],
     }
     if save_path and beats_baseline:

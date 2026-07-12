@@ -17,7 +17,7 @@ import logging
 
 from ..config import Config
 from ..technical.data import fetch_bars
-from .features import features_series, to_vector
+from .features import features_series, market_index_for, to_vector
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +26,19 @@ Dataset = dict[str, tuple[list[list[float]], list[int]]]
 
 def build_backtest_dataset(symbols: list[str], cfg: Config, timeframe: str = "1d",
                            horizon: int = 1, period: str = "10y") -> Dataset:
+    # One index fetch per market, shared by every symbol trading under it.
+    market_cache: dict[str, list] = {}
+
+    def market_bars_for(symbol: str):
+        index = market_index_for(symbol)
+        if index not in market_cache:
+            try:
+                market_cache[index] = fetch_bars(index, cfg, timeframe, period=period)
+            except Exception as exc:  # pragma: no cover - network hiccups
+                log.warning("dataset: market index fetch failed for %s: %s", index, exc)
+                market_cache[index] = []
+        return market_cache[index]
+
     data: Dataset = {}
     for symbol in symbols:
         try:
@@ -36,7 +49,7 @@ def build_backtest_dataset(symbols: list[str], cfg: Config, timeframe: str = "1d
         if len(bars) <= horizon:
             continue
         closes = [b.close for b in bars]
-        series = features_series(bars)
+        series = features_series(bars, market_bars_for(symbol))
         rows_x: list[list[float]] = []
         rows_y: list[int] = []
         for i in range(len(bars) - horizon):

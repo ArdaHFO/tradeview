@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import Config
 from .fusion.combine import combine
-from .learning.features import features_from_bars, to_vector
+from .learning.features import features_from_bars, market_index_for
 from .learning.train import load_model
 from .models import NewsVerdict, Prediction, TechnicalVerdict
 from .news.fetch import fetch_articles
@@ -45,7 +45,16 @@ def _technical_pipeline(item: dict, cfg: Config) -> tuple[TechnicalVerdict, floa
     bars = fetch_bars(item["symbol"], cfg, timeframe)
     verdict = score_technical(item["symbol"], bars)
     price = bars[-1].close if bars else None
-    features = features_from_bars(bars) if bars else None  # news filled in later
+    features = None
+    if bars:
+        market_bars = None
+        if str(item.get("profile")) == "learned":
+            # Regime / relative-strength features need the symbol's market index.
+            try:
+                market_bars = fetch_bars(market_index_for(item["symbol"]), cfg, timeframe)
+            except Exception:
+                market_bars = None
+        features = features_from_bars(bars, market_bars=market_bars)  # news filled in later
     return verdict, price, features
 
 
@@ -118,7 +127,7 @@ def run_for_symbols(symbols: list[dict], cfg: Config, progress_cb=None, user_id:
             if profile == "learned" and learned_model is not None and features is not None:
                 feat = dict(features)
                 feat["news"] = news_verdict.score  # fill in the live news feature
-                proba_up = learned_model.predict_proba(to_vector(feat))
+                proba_up = learned_model.predict_from_dict(feat)
                 learned_score = 2.0 * proba_up - 1.0
 
             prediction = combine(

@@ -572,6 +572,15 @@ def create_app(cfg: Config) -> FastAPI:
         finally:
             recorder.close()
 
+    @app.delete("/api/watchlist/{symbol}")
+    def api_watchlist_delete(symbol: str, user_id: int = Depends(require_user)) -> JSONResponse:
+        recorder = _recorder()
+        try:
+            recorder.delete_watchlist(symbol, user_id=user_id)
+            return JSONResponse({"ok": True})
+        finally:
+            recorder.close()
+
     @app.post("/api/analyze")
     def api_analyze(req: AnalyzeRequest, user_id: int = Depends(require_user)) -> JSONResponse:
         current_cfg = _get_runtime(user_id).current_cfg()
@@ -874,12 +883,39 @@ details.settings summary{cursor:pointer;font-size:15px;font-weight:700;list-styl
 details.settings summary::-webkit-details-marker{display:none}
 details.settings summary::before{content:"▸";color:var(--muted);transition:transform .15s}
 details.settings[open] summary::before{transform:rotate(90deg)}
-/* tab navigation */
-.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;border-bottom:1px solid var(--line)}
-.tabs button{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--muted);padding:11px 16px;font-size:14px;font-weight:600;cursor:pointer;border-radius:10px 10px 0 0;margin-bottom:-1px}
-.tabs button:hover{color:var(--text);background:rgba(255,255,255,.03)}
-.tabs button.active{color:var(--text);border-bottom-color:var(--blue)}
+/* tab navigation — sticky glass bar */
+.tabs{position:sticky;top:10px;z-index:60;display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;padding:6px;border:1px solid var(--line);border-radius:16px;background:rgba(10,20,38,.72);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);box-shadow:0 12px 30px rgba(0,0,0,.28)}
+.tabs button{background:transparent;border:0;color:var(--muted);padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer;border-radius:11px;transition:color .15s,background .15s}
+.tabs button:hover{color:var(--text);background:rgba(255,255,255,.05)}
+.tabs button.active{color:#eaf2ff;background:linear-gradient(180deg,rgba(108,167,255,.28),rgba(108,167,255,.14));box-shadow:inset 0 0 0 1px rgba(108,167,255,.35)}
 .tabhide,.is-hidden{display:none!important}
+/* modern polish */
+h1{background:linear-gradient(92deg,#eaf2ff 20%,#8fb8ff 60%,#31c48d 110%);-webkit-background-clip:text;background-clip:text;color:transparent}
+.grid > .card{animation:rise .35s ease both}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.card{transition:border-color .2s,box-shadow .2s}
+.card:hover{border-color:#2b4470}
+table{font-variant-numeric:tabular-nums}
+tbody tr{transition:background .12s}
+tbody tr:hover td{background:rgba(255,255,255,.022)}
+.btn{transition:transform .12s,filter .12s,box-shadow .12s}
+.btn:hover:not(:disabled){transform:translateY(-1px);filter:brightness(1.07)}
+.btn:active:not(:disabled){transform:translateY(0)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#22365c;border-radius:999px}
+::-webkit-scrollbar-track{background:transparent}
+/* history filter chips + symbol performance bars */
+.hist-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.perfbar{display:flex;align-items:center;gap:8px}
+.perfbar .track{flex:1;height:8px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden}
+.perfbar .track i{display:block;height:100%;border-radius:999px}
+/* selective accuracy chips on the model card */
+.sel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px}
+.sel-cell{border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:rgba(255,255,255,.03)}
+.sel-cell.hot{border-color:rgba(49,196,141,.45);background:rgba(49,196,141,.08)}
+.sel-cell .t{font-size:11px;color:var(--muted)}
+.sel-cell .a{font-size:19px;font-weight:800;margin-top:2px}
+.sel-cell .c{font-size:11px;color:var(--muted);margin-top:2px}
 /* browse popular stocks */
 .browse{margin-top:14px;border-top:1px solid rgba(255,255,255,.06);padding-top:12px}
 .browse-list{display:flex;flex-wrap:wrap;gap:8px;max-height:190px;overflow-y:auto;margin-top:10px}
@@ -1133,8 +1169,21 @@ details.settings[open] summary::before{transform:rotate(90deg)}
       <div id="detailNews"><div class="muted">Yükleniyor...</div></div>
     </div>
 
-    <div class="card half" data-tab="panom"><h3 style="margin:0 0 10px">★ Favori Listem</h3><table><thead><tr><th>Sembol</th><th>Ad</th><th>Profil / Zaman Dilimi</th><th>Kaynak</th></tr></thead><tbody id="watchlist"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
-    <div class="card half" data-tab="panom"><h3 style="margin:0 0 10px">🕓 Geçmiş Tahminler</h3><table><thead><tr><th>Zaman</th><th>Sembol</th><th>Yön</th><th>İsabet</th></tr></thead><tbody id="history"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
+    <div class="card half" data-tab="panom"><h3 style="margin:0 0 10px">★ Favori Listem</h3><table><thead><tr><th>Sembol</th><th>Ad</th><th>Profil / Zaman Dilimi</th><th style="text-align:right">İşlem</th></tr></thead><tbody id="watchlist"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
+    <div class="card half" data-tab="panom">
+      <h3 style="margin:0 0 10px">🕓 Geçmiş Tahminler <span class="muted" style="font-weight:400;font-size:12px">— satıra tıkla, detayı aç</span></h3>
+      <div class="hist-chips toggle-group" id="hist_filter">
+        <label class="toggle"><input type="radio" name="histf" value="all" checked> Tümü</label>
+        <label class="toggle"><input type="radio" name="histf" value="hit"> ✅ İsabet</label>
+        <label class="toggle"><input type="radio" name="histf" value="miss"> ❌ Kaçırdı</label>
+        <label class="toggle"><input type="radio" name="histf" value="pending"> ⏳ Bekliyor</label>
+      </div>
+      <table><thead><tr><th>Zaman</th><th>Sembol</th><th>Yön</th><th>İsabet</th></tr></thead><tbody id="history"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table>
+    </div>
+    <div class="card panel" data-tab="panom">
+      <h3 style="margin:0 0 10px">🏆 Sembol Performansı <span class="muted" style="font-weight:400;font-size:12px">— son 30 gün, sonuçlanmış tahminlere göre</span></h3>
+      <table><thead><tr><th>Sembol</th><th>Tahmin</th><th>İsabet</th><th style="width:45%">Oran</th><th>Ort. Güven</th></tr></thead><tbody id="symperf"><tr><td colspan="5" class="empty">Henüz sonuçlanmış tahmin yok.</td></tr></tbody></table>
+    </div>
     </div>
 
     </div>
@@ -1260,6 +1309,8 @@ document.addEventListener('click', (ev) => {
 
 // Re-render the screener table when the up/down/all filter changes.
 document.getElementById('scr_filter').addEventListener('change', renderScreener);
+// Re-render history when its hit/miss/pending filter changes.
+document.getElementById('hist_filter').addEventListener('change', renderHistory);
 
 function checkedValues(selector){
   return [...document.querySelectorAll(selector + ':checked')].map(el => el.value);
@@ -1607,12 +1658,22 @@ async function loadHistory(){
   // and whichever of the two async calls finished last silently won.
   const r = await fetch('/api/history?days=7');
   const s = await r.json();
-  document.getElementById('history').innerHTML = s.recent.length ? s.recent.map(p => `<tr class="row-clickable" onclick='openHistoryDetail(${JSON.stringify(p).replace(/'/g, "&#39;")})'>
+  historyRows = s.recent || [];
+  renderHistory();
+}
+
+let historyRows = [];
+function historyFilterValue(){ const el = document.querySelector('input[name="histf"]:checked'); return el ? el.value : 'all'; }
+function renderHistory(){
+  const f = historyFilterValue();
+  const rows = historyRows.filter(p => f === 'all'
+    || (f === 'hit' && p.hit === 1) || (f === 'miss' && p.hit === 0) || (f === 'pending' && p.hit === null));
+  document.getElementById('history').innerHTML = rows.length ? rows.map(p => `<tr class="row-clickable" onclick='openHistoryDetail(${JSON.stringify(p).replace(/'/g, "&#39;")})'>
     <td>${new Date(p.ts).toLocaleString('tr-TR')}</td>
     <td><b>${esc(p.symbol)}</b></td>
     <td class="${dirClass(p.final_direction)}">${dirLabel(p.final_direction)}</td>
-    <td>${p.hit === null ? '—' : (p.hit ? '✅' : '❌')}</td>
-    </tr>`).join('') : '<tr><td colspan="4" class="empty">Henüz tahmin yok</td></tr>';
+    <td>${p.hit === null ? '⏳' : (p.hit ? '✅' : '❌')}</td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty">Bu filtrede tahmin yok.</td></tr>';
 }
 
 function chartOrUpdate(current, ctx, config){ if (current) current.destroy(); return new Chart(ctx, config); }
@@ -1667,7 +1728,36 @@ async function loadDashboard(){
     });
   } else if (barChart){ barChart.destroy(); barChart = null; }
 
-    document.getElementById('watchlist').innerHTML = d.watchlist.length ? d.watchlist.map(w => `<tr><td><b>${esc(w.symbol)}</b></td><td>${esc(w.name || '')}</td><td>${esc(w.profiles || '')} / ${esc(w.timeframes || '')}</td><td class="muted">${esc(w.sources || '')} <button class="btn alt small" style="margin-left:8px" onclick='editWatchlist(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Seç</button></td></tr>`).join('') : '<tr><td colspan="4" class="empty">Favori listesi boş — bir sembol seçip "Favorilere Ekle" butonuna basın.</td></tr>';
+    document.getElementById('watchlist').innerHTML = d.watchlist.length ? d.watchlist.map(w => `<tr>
+      <td><b>${esc(w.symbol)}</b></td><td class="muted">${esc(w.name || '')}</td>
+      <td class="muted">${esc(w.profiles || '')} / ${esc(w.timeframes || '')}</td>
+      <td style="text-align:right;white-space:nowrap">
+        <button class="btn good small" onclick='analyzeWatchlistItem(${JSON.stringify(w).replace(/'/g,"&#39;")})'>▶ Analiz</button>
+        <button class="btn alt small" onclick='editWatchlist(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Seç</button>
+        <button class="btn alt small" title="Favorilerden kaldır" onclick='removeWatchlistItem("${esc(w.symbol)}")'>🗑</button>
+      </td></tr>`).join('') : '<tr><td colspan="4" class="empty">Favori listesi boş — bir sembol seçip "Favorilere Ekle" butonuna basın.</td></tr>';
+
+    // Per-symbol scorecard: hit-rate bars over the last 30 days.
+    const perf = (d.by_symbol || []).filter(x => x.total > 0);
+    document.getElementById('symperf').innerHTML = perf.length ? perf.map(x => {
+      const pct = x.total ? Math.round(100 * x.hits / x.total) : 0;
+      const col = pct >= 55 ? 'var(--green)' : (pct <= 45 ? 'var(--red)' : 'var(--amber)');
+      return `<tr>
+        <td><b>${esc(x.symbol)}</b></td><td>${x.total}</td><td>${x.hits}</td>
+        <td><div class="perfbar"><div class="track"><i style="width:${pct}%;background:${col}"></i></div><span style="color:${col};font-weight:700">%${pct}</span></div></td>
+        <td class="muted">${x.avg_confidence == null ? '—' : '%' + Math.round(x.avg_confidence * 100)}</td>
+      </tr>`;
+    }).join('') : '<tr><td colspan="5" class="empty">Henüz sonuçlanmış tahmin yok.</td></tr>';
+}
+
+function analyzeWatchlistItem(w){
+  editWatchlist(w);       // selects it (and switches to the Analiz tab)
+  analyze();
+}
+
+async function removeWatchlistItem(symbol){
+  await fetch('/api/watchlist/' + encodeURIComponent(symbol), {method:'DELETE'});
+  loadDashboard();
 }
 
 let compareChart = null;
@@ -2079,6 +2169,7 @@ function renderTradePlan(sym, sm){
 }
 
 // Show the learned model's honest report card.
+let modelMeta = null;   // stashed for the learned-mode verdict banner
 async function loadModelInfo(){
   const box = document.getElementById('modelBody');
   let d = {available: false};
@@ -2088,20 +2179,30 @@ async function loadModelInfo(){
     return;
   }
   const m = d.meta || {};
+  modelMeta = m;
   const acc = (m.accuracy != null) ? (m.accuracy * 100).toFixed(1) : '—';
   const base = (m.baseline_accuracy != null) ? (m.baseline_accuracy * 100).toFixed(1) : '—';
   const auc = (m.auc != null) ? m.auc.toFixed(3) : '—';
   const edge = (m.accuracy != null && m.baseline_accuracy != null) ? '+' + ((m.accuracy - m.baseline_accuracy) * 100).toFixed(1) + ' puan' : '—';
   const when = m.trained_at ? new Date(m.trained_at).toLocaleString('tr-TR') : '—';
   const cell = (k, v, extra = '') => `<div class="cell"><div class="k">${k}</div><div class="v" ${extra}>${v}</div></div>`;
-  const strip = '<div class="statstrip">'
+  const strip = '<div class="statstrip" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr))">'
     + cell('Doğruluk (test)', '%' + acc, 'style="color:var(--green)"')
     + cell('Baseline (trend)', '%' + base)
-    + cell('Kenar (edge)', edge)
-    + cell('AUC', auc)
+    + cell('Taban oran (hep-Yükseliş)', m.base_rate != null ? '%' + (m.base_rate * 100).toFixed(1) : '—')
+    + cell('AUC (ayırt edicilik)', auc)
     + cell('Test örneği', (m.n_test || 0).toLocaleString('tr-TR'))
     + cell('Ufuk', (m.horizon || '—') + ' bar (~3 ay)')
     + '</div>';
+  // The professional part: accuracy when acting only on stronger signals.
+  const sel = (m.selective || []).filter(b => b.min_conviction > 0);
+  const selGrid = sel.length ? '<div class="muted" style="font-size:12px;margin-top:14px">🎯 <b>Seçici mod:</b> model yalnızca güçlü sinyallerde kullanıldığında (out-of-sample):</div>'
+    + '<div class="sel-grid">' + sel.map(b => `
+      <div class="sel-cell ${b.accuracy >= 0.65 ? 'hot' : ''}">
+        <div class="t">Sinyal gücü ≥ ${(b.min_conviction * 100).toFixed(0)}</div>
+        <div class="a" style="color:${b.accuracy >= 0.65 ? 'var(--green)' : 'var(--text)'}">%${(b.accuracy * 100).toFixed(1)}</div>
+        <div class="c">kapsam %${(b.coverage * 100).toFixed(1)} · n=${b.n.toLocaleString('tr-TR')}</div>
+      </div>`).join('') + '</div>' : '';
   const w = d.weights || {};
   const names = Object.keys(w);
   const maxW = Math.max(0.0001, ...names.map(n => Math.abs(w[n])));
