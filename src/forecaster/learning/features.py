@@ -12,10 +12,11 @@ from __future__ import annotations
 
 from ..models import Bar
 from ..technical.indicators import (
-    bollinger_bands, ema, macd, rsi, sma, supertrend, volume_trend,
+    atr, bollinger_bands, ema, macd, rsi, sma, supertrend, volume_trend,
 )
 
-# Order is the model's input order — never reorder without retraining.
+# Order is the model's input order — never reorder without retraining. The
+# model standardises every column, so raw scales (returns, ATR%) are fine.
 FEATURE_NAMES: tuple[str, ...] = (
     "trend_sma",    # SMA50 vs SMA200 (+1/-1/0)
     "trend_ema",    # close vs EMA20
@@ -24,12 +25,18 @@ FEATURE_NAMES: tuple[str, ...] = (
     "bb_pos",       # position within Bollinger bands [-1,1]
     "vol_ratio",    # volume / 20d avg - 1, clipped
     "supertrend",   # +1/-1
-    "ret_5",        # 5-bar return (scaled/clipped)
-    "ret_20",       # 20-bar return (scaled/clipped)
+    "ret_5",        # 5-bar return
+    "ret_20",       # 20-bar return (~1 month)
+    "ret_60",       # 60-bar return (~3 months momentum)
+    "ret_120",      # 120-bar return (~6 months momentum)
+    "dist_high",    # distance below the 52-week high, in [-1, 0]
+    "ma_gap",       # (close - SMA50) / SMA50, continuous trend strength
+    "atr_pct",      # ATR / close — volatility regime
     "news",         # news score [-1,1], 0 if unknown
 )
 
 MIN_BARS = 50
+_HIGH_WINDOW = 252  # ~1 trading year for the 52-week high
 
 
 def _clip(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
@@ -57,8 +64,11 @@ def features_series(bars: list[Bar]) -> list[dict | None]:
     up, mid, low = bollinger_bands(closes)
     vt = volume_trend(vols)
     _, _, st_dir, _ = supertrend(highs, lows, closes, period=10, multiplier=3.0)
+    atr14 = atr(highs, lows, closes, 14)
 
     for i in range(n):
+        recent_high = max(closes[max(0, i - _HIGH_WINDOW + 1):i + 1])  # trailing 52-week high
+
         if ema20[i] is None or rsi14[i] is None:
             continue  # core indicators not warmed up yet
 
@@ -75,13 +85,19 @@ def features_series(bars: list[Bar]) -> list[dict | None]:
             bb = 0.0
         vol = 0.0 if vt[i] is None else _clip(vt[i] - 1.0)
         st = 0.0 if st_dir[i] is None else float(st_dir[i])
-        ret5 = _clip((closes[i] / closes[i - 5] - 1.0) * 5.0) if i >= 5 and closes[i - 5] else 0.0
-        ret20 = _clip((closes[i] / closes[i - 20] - 1.0) * 2.0) if i >= 20 and closes[i - 20] else 0.0
+        ret5 = _clip(closes[i] / closes[i - 5] - 1.0) if i >= 5 and closes[i - 5] else 0.0
+        ret20 = _clip(closes[i] / closes[i - 20] - 1.0) if i >= 20 and closes[i - 20] else 0.0
+        ret60 = _clip(closes[i] / closes[i - 60] - 1.0) if i >= 60 and closes[i - 60] else 0.0
+        ret120 = _clip(closes[i] / closes[i - 120] - 1.0) if i >= 120 and closes[i - 120] else 0.0
+        dist_high = _clip((closes[i] - recent_high) / recent_high) if recent_high else 0.0
+        ma_gap = _clip((closes[i] - sma50[i]) / sma50[i]) if sma50[i] else 0.0
+        atr_pct = _clip(atr14[i] / closes[i], 0.0, 1.0) if atr14[i] is not None and closes[i] else 0.0
 
         out[i] = {
             "trend_sma": trend_sma, "trend_ema": trend_ema, "rsi": rsi_f,
-            "macd_hist": macd_f, "bb_pos": bb, "vol_ratio": vol,
-            "supertrend": st, "ret_5": ret5, "ret_20": ret20, "news": 0.0,
+            "macd_hist": macd_f, "bb_pos": bb, "vol_ratio": vol, "supertrend": st,
+            "ret_5": ret5, "ret_20": ret20, "ret_60": ret60, "ret_120": ret120,
+            "dist_high": dist_high, "ma_gap": ma_gap, "atr_pct": atr_pct, "news": 0.0,
         }
     return out
 

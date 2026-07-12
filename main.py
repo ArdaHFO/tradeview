@@ -27,9 +27,12 @@ def main() -> None:
     sub.add_parser("serve", help="run the web UI (FastAPI + uvicorn)")
 
     train_parser = sub.add_parser("train", help="train the learned fusion model on backtested history")
-    train_parser.add_argument("--universe", default="us",
-                              help="screener universe to train on: bist | us | eu | all (default us)")
+    train_parser.add_argument("--universe", default="all",
+                              help="screener universe to train on: bist | us | eu | all (default all)")
     train_parser.add_argument("--timeframe", default="1d")
+    train_parser.add_argument("--horizon", type=int, default=60,
+                              help="forward bars for the up/down label (default 60 ~ one quarter, "
+                                   "where technical/momentum signals actually have edge)")
     train_parser.add_argument("--test-frac", type=float, default=0.3)
 
     args = parser.parse_args()
@@ -65,9 +68,11 @@ def main() -> None:
         if not symbols:
             print(f"Unknown universe '{args.universe}'. Use: bist | us | eu | all")
             return
-        print(f"Training on {len(symbols)} symbols from '{args.universe}' (~5y history each)...")
+        print(f"Training on {len(symbols)} symbols from '{args.universe}' "
+              f"(~10y history, {args.horizon}-bar horizon)...")
         _, report = train_and_evaluate(symbols, cfg, timeframe=args.timeframe,
-                                        test_frac=args.test_frac, save_path=cfg.model_path)
+                                        horizon=args.horizon, test_frac=args.test_frac,
+                                        save_path=cfg.model_path)
         print(json.dumps(report, indent=2, ensure_ascii=False))
 
 

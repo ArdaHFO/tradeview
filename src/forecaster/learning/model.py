@@ -51,6 +51,26 @@ class LogisticRegression:
         if not X:
             raise ValueError("cannot fit on an empty dataset")
         self._fit_scaler(X)
+        try:
+            import numpy as np  # optional: vectorised GD for large datasets
+        except ImportError:
+            return self._fit_python(X, y)
+
+        Xs = np.array([self._z(x) for x in X], dtype=float)
+        yv = np.array(y, dtype=float)
+        n, m = Xs.shape
+        w = np.zeros(m)
+        b = 0.0
+        for _ in range(self.epochs):
+            p = 1.0 / (1.0 + np.exp(-np.clip(Xs.dot(w) + b, -30.0, 30.0)))
+            err = p - yv
+            w -= self.lr * (Xs.T.dot(err) / n + self.l2 * w)
+            b -= self.lr * (err.sum() / n)
+        self.weights = w.tolist()
+        self.bias = float(b)
+        return self
+
+    def _fit_python(self, X: list[list[float]], y: list[int]) -> "LogisticRegression":
         Xs = [self._z(x) for x in X]
         n = len(Xs)
         m = len(self.feature_names)

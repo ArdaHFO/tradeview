@@ -25,7 +25,7 @@ Dataset = dict[str, tuple[list[list[float]], list[int]]]
 
 
 def build_backtest_dataset(symbols: list[str], cfg: Config, timeframe: str = "1d",
-                           horizon: int = 1, period: str = "5y") -> Dataset:
+                           horizon: int = 1, period: str = "10y") -> Dataset:
     data: Dataset = {}
     for symbol in symbols:
         try:

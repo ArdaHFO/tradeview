@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 _TIMEFRAME_SPECS: dict[str, tuple[str, str]] = {
     "30m": ("30m", "60d"),
     "1h": ("60m", "730d"),
-    "1d": ("1d", "6mo"),
+    "1d": ("1d", "1y"),
     "1wk": ("1wk", "5y"),
     "1mo": ("1mo", "10y"),
 }
