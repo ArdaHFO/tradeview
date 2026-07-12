@@ -36,3 +36,45 @@ def test_small_combined_score_is_neutral():
     cfg = _cfg(neutral_band=0.15)
     pred = combine(news, tech, price=150.0, cfg=cfg)
     assert pred.final_direction == Direction.NEUTRAL
+
+
+def test_neutral_side_does_not_penalize_confidence():
+    # A merely-neutral technical read must not be treated as "disagreeing" with
+    # bullish news — confidence should be the plain weighted blend, not halved.
+    news = NewsVerdict(symbol="AAPL", direction=Direction.UP, score=0.5, confidence=0.6,
+                        rationale="positive")
+    tech = TechnicalVerdict(symbol="AAPL", score=0.0, reasons=["flat"])
+    pred = combine(news, tech, price=150.0, cfg=_cfg())
+    assert pred.final_confidence == 0.3  # 0.5*0.6 + 0.5*0, no penalty
+
+
+def test_zero_weight_side_ignored_in_confidence():
+    # In technical_only, disagreeing news (which has zero weight) must not drag
+    # the confidence down.
+    news = NewsVerdict(symbol="AAPL", direction=Direction.UP, score=0.6, confidence=0.9,
+                        rationale="bullish")
+    tech = TechnicalVerdict(symbol="AAPL", score=-0.4, reasons=["downtrend"])
+    pred = combine(news, tech, price=150.0, cfg=_cfg(), profile="technical_only")
+    assert pred.final_direction == Direction.DOWN
+    assert pred.final_confidence == 0.4  # 1.0*|-0.4|, news ignored
+
+
+def test_unavailable_news_hands_weight_to_technicals():
+    # No usable news signal (confidence 0) should not halve the technical read.
+    news = NewsVerdict(symbol="AAPL", direction=Direction.NEUTRAL, score=0.0, confidence=0.0,
+                        rationale="NEWS_UNAVAILABLE (no Groq API key)")
+    tech = TechnicalVerdict(symbol="AAPL", score=0.6, reasons=["uptrend"])
+    pred = combine(news, tech, price=150.0, cfg=_cfg())
+    assert pred.final_score == 0.6            # not 0.3
+    assert pred.final_direction == Direction.UP
+    assert pred.final_confidence == 0.6       # 1.0*|0.6|
+
+
+def test_news_only_with_no_news_stays_neutral():
+    # A news_only run with no news has nothing to fall back on — stays neutral.
+    news = NewsVerdict(symbol="AAPL", direction=Direction.NEUTRAL, score=0.0, confidence=0.0,
+                        rationale="no recent news found")
+    tech = TechnicalVerdict(symbol="AAPL", score=0.8, reasons=["uptrend"])
+    pred = combine(news, tech, price=150.0, cfg=_cfg(), profile="news_only")
+    assert pred.final_score == 0.0
+    assert pred.final_direction == Direction.NEUTRAL

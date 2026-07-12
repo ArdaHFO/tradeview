@@ -103,14 +103,17 @@ def score_technical(symbol: str, bars: list[Bar]) -> TechnicalVerdict:
 
     volume_score = 0.0
     if vtrend[last] is not None:
-        direction = 1.0 if trend_score >= 0 else -1.0
-        volume_score = direction * _clamp(vtrend[last] - 1.0)
+        # Volume only *confirms* a trend — with no trend to confirm (trend_score
+        # exactly 0), it shouldn't imply a direction of its own.
+        trend_dir = 1.0 if trend_score > 0 else (-1.0 if trend_score < 0 else 0.0)
+        volume_score = trend_dir * _clamp(vtrend[last] - 1.0)
         reasons.append(f"volume {vtrend[last]:.1f}x 20d avg")
         indicators.append(IndicatorDetail(
             name="Hacim Oranı", value=f"{vtrend[last]:.2f}x (20g ort.)",
             direction=_dir(volume_score), weight_pct=15.0,
-            explanation="Son işlem hacminin 20 günlük ortalamaya oranı. Ortalamanın "
-                        "üzerinde hacim, fiyat hareketinin gücünü teyit eder.",
+            explanation="Son işlem hacminin 20 günlük ortalamaya oranı. Trend yönünde "
+                        "ortalama-üstü hacim (oran > 1) hareketi teyit eder; ortalama-altı "
+                        "hacim (oran < 1) teyidin zayıf kaldığını gösterir.",
         ))
 
     position_score = 0.0
@@ -122,9 +125,10 @@ def score_technical(symbol: str, bars: list[Bar]) -> TechnicalVerdict:
             indicators.append(IndicatorDetail(
                 name="Bollinger Bantları", value=f"{position_score:+.2f} (bant içi konum)",
                 direction=_dir(position_score), weight_pct=10.0,
-                explanation="Fiyatın bantlar içindeki konumu -1 (alt bant) ile +1 (üst bant) "
-                            "arasında ölçülür. Üst banda yakınlık aşırı alım, alt banda "
-                            "yakınlık aşırı satım baskısına işaret edebilir.",
+                explanation="Fiyatın Bollinger bantları içindeki konumu (-1 alt bant, +1 üst "
+                            "bant). Orta bandın üzerinde / üst banda yakın olması yükseliş "
+                            "gücüne, altında / alt banda yakın olması düşüş baskısına işaret "
+                            "eder; uçlara (±1) çok yaklaşması aşırı alım/satım riski taşıyabilir.",
             ))
 
     final = _clamp(0.40 * trend_score + 0.25 * momentum_score
