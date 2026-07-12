@@ -1,5 +1,6 @@
 .env
 predictions.db
+model.json
 __pycache__/
 *.pyc
 .pytest_cache/

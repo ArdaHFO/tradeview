@@ -925,6 +925,7 @@ details.settings[open] summary::before{transform:rotate(90deg)}
             <option value="technical_heavy">Teknik ağırlıklı</option>
             <option value="news_only">Sadece haber</option>
             <option value="technical_only">Sadece teknik</option>
+            <option value="learned">🤖 Öğrenen model (beta)</option>
           </select>
         </div>
         <div class="field" style="min-width:240px">

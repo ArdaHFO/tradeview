@@ -26,6 +26,12 @@ def main() -> None:
     report_parser.add_argument("--days", type=int, default=7)
     sub.add_parser("serve", help="run the web UI (FastAPI + uvicorn)")
 
+    train_parser = sub.add_parser("train", help="train the learned fusion model on backtested history")
+    train_parser.add_argument("--universe", default="us",
+                              help="screener universe to train on: bist | us | eu | all (default us)")
+    train_parser.add_argument("--timeframe", default="1d")
+    train_parser.add_argument("--test-frac", type=float, default=0.3)
+
     args = parser.parse_args()
     cfg = load_config()
 
@@ -50,6 +56,19 @@ def main() -> None:
             logging.warning("REGISTRATION_CODE not set — anyone can register an account!")
         port = int(os.environ.get("PORT", "8000"))
         uvicorn.run(create_app(cfg), host="0.0.0.0", port=port)
+    elif args.command == "train":
+        import json
+        from forecaster.screener import UNIVERSES
+        from forecaster.learning.train import train_and_evaluate
+        keys = list(UNIVERSES) if args.universe == "all" else [args.universe]
+        symbols = [sym for k in keys for sym, _ in UNIVERSES.get(k, {}).get("symbols", [])]
+        if not symbols:
+            print(f"Unknown universe '{args.universe}'. Use: bist | us | eu | all")
+            return
+        print(f"Training on {len(symbols)} symbols from '{args.universe}' (~5y history each)...")
+        _, report = train_and_evaluate(symbols, cfg, timeframe=args.timeframe,
+                                        test_frac=args.test_frac, save_path=cfg.model_path)
+        print(json.dumps(report, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

@@ -61,6 +61,11 @@ class Config:
     max_symbols_per_run: int = field(
         default_factory=lambda: _env_int("MAX_SYMBOLS_PER_RUN", 10))
 
+    # Path to the trained learned-fusion model (JSON). Used by the "learned"
+    # profile; absent/invalid file just means the profile falls back to balanced.
+    model_path: str = field(
+        default_factory=lambda: os.environ.get("MODEL_PATH", "model.json"))
+
 
 def load_config() -> Config:
     """Load .env (if python-dotenv is installed) then build Config from env."""

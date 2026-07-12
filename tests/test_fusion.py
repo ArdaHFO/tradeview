@@ -70,6 +70,27 @@ def test_unavailable_news_hands_weight_to_technicals():
     assert pred.final_confidence == 0.6       # 1.0*|0.6|
 
 
+def test_learned_profile_uses_model_score():
+    # In "learned" mode the model's score drives the prediction directly,
+    # regardless of the raw news/technical scores.
+    news = NewsVerdict(symbol="AAPL", direction=Direction.NEUTRAL, score=0.0, confidence=0.0,
+                        rationale="n/a")
+    tech = TechnicalVerdict(symbol="AAPL", score=-0.9, reasons=["bearish"])
+    pred = combine(news, tech, price=100.0, cfg=_cfg(), profile="learned", learned_score=0.8)
+    assert pred.final_score == 0.8
+    assert pred.final_direction == Direction.UP
+    assert pred.final_confidence == 0.8
+
+
+def test_learned_profile_falls_back_to_blend_without_model():
+    # profile "learned" but no learned_score (no model) -> behaves like balanced.
+    news = NewsVerdict(symbol="AAPL", direction=Direction.UP, score=0.6, confidence=0.7,
+                        rationale="bullish")
+    tech = TechnicalVerdict(symbol="AAPL", score=0.4, reasons=["up"])
+    pred = combine(news, tech, price=100.0, cfg=_cfg(), profile="learned", learned_score=None)
+    assert abs(pred.final_score - 0.5) < 1e-9  # 0.5*0.6 + 0.5*0.4
+
+
 def test_news_only_with_no_news_stays_neutral():
     # A news_only run with no news has nothing to fall back on — stays neutral.
     news = NewsVerdict(symbol="AAPL", direction=Direction.NEUTRAL, score=0.0, confidence=0.0,

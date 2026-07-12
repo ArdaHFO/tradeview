@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timezone
 
 import yfinance as yf
@@ -21,6 +22,9 @@ _TIMEFRAME_SPECS: dict[str, tuple[str, str]] = {
 
 ALLOWED_TIMEFRAMES: tuple[str, ...] = tuple(_TIMEFRAME_SPECS.keys())
 
+# yfinance period grammar (e.g. "60d", "6mo", "5y", "ytd", "max").
+_PERIOD_RE = re.compile(r"^(\d+(d|mo|y)|ytd|max)$")
+
 
 def _resolve_timeframe(cfg: Config, timeframe: str) -> tuple[str, str]:
     spec = _TIMEFRAME_SPECS.get(timeframe)
@@ -35,8 +39,15 @@ def _resolve_timeframe(cfg: Config, timeframe: str) -> tuple[str, str]:
     return interval, default_period
 
 
-def fetch_bars(symbol: str, cfg: Config, timeframe: str = "1d") -> list[Bar]:
-    interval, period = _resolve_timeframe(cfg, timeframe)
+def fetch_bars(symbol: str, cfg: Config, timeframe: str = "1d",
+               period: str | None = None) -> list[Bar]:
+    interval, resolved_period = _resolve_timeframe(cfg, timeframe)
+    # An explicit period (e.g. "5y" for model training) overrides the timeframe
+    # default; unrecognised values fall back to the default rather than reaching
+    # yfinance unvalidated.
+    if period and _PERIOD_RE.match(period):
+        resolved_period = period
+    period = resolved_period
     df = yf.download(symbol, period=period, interval=interval,
                       progress=False, auto_adjust=False)
     if df is None or df.empty:

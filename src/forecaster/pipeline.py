@@ -8,6 +8,8 @@ from pathlib import Path
 
 from .config import Config
 from .fusion.combine import combine
+from .learning.features import features_from_bars, to_vector
+from .learning.train import load_model
 from .models import NewsVerdict, Prediction, TechnicalVerdict
 from .news.fetch import fetch_articles
 from .news.sentiment import analyze_news
@@ -38,12 +40,13 @@ def _news_pipeline(item: dict, cfg: Config) -> NewsVerdict:
     return analyze_news(item["symbol"], articles, cfg)
 
 
-def _technical_pipeline(item: dict, cfg: Config) -> tuple[TechnicalVerdict, float | None]:
+def _technical_pipeline(item: dict, cfg: Config) -> tuple[TechnicalVerdict, float | None, dict | None]:
     timeframe = str(item.get("timeframe", "1d"))
     bars = fetch_bars(item["symbol"], cfg, timeframe)
     verdict = score_technical(item["symbol"], bars)
     price = bars[-1].close if bars else None
-    return verdict, price
+    features = features_from_bars(bars) if bars else None  # news filled in later
+    return verdict, price, features
 
 
 def _analysis_meta(item: dict) -> tuple[str, str, str]:
@@ -92,17 +95,32 @@ def run_for_symbols(symbols: list[dict], cfg: Config, progress_cb=None, user_id:
         news_futures = {key: ex.submit(_news_pipeline, item, cfg) for key, item in news_items.items()}
         tech_futures = {key: ex.submit(_technical_pipeline, item, cfg) for key, item in tech_items.items()}
 
+    # Load the learned model once, only if some item actually asks for it.
+    learned_model = None
+    if any(str(item.get("profile")) == "learned" for item in symbols):
+        learned_model = load_model(cfg.model_path)
+        if learned_model is None:
+            log.warning("learned profile requested but no usable model at %s — falling back to balanced blend", cfg.model_path)
+
     predictions: list[Prediction] = []
     recorder = PredictionRecorder(cfg.db_path)
     try:
         for item in symbols:
             symbol = item["symbol"]
             news_verdict = news_futures[_news_key(item)].result()
-            tech_verdict, price = tech_futures[_tech_key(item)].result()
+            tech_verdict, price, features = tech_futures[_tech_key(item)].result()
             if price is None:
                 log.warning("skipping %s: no technical price data", symbol)
                 continue
             timeframe, profile, news_sources = _analysis_meta(item)
+
+            learned_score = None
+            if profile == "learned" and learned_model is not None and features is not None:
+                feat = dict(features)
+                feat["news"] = news_verdict.score  # fill in the live news feature
+                proba_up = learned_model.predict_proba(to_vector(feat))
+                learned_score = 2.0 * proba_up - 1.0
+
             prediction = combine(
                 news_verdict,
                 tech_verdict,
@@ -112,6 +130,7 @@ def run_for_symbols(symbols: list[dict], cfg: Config, progress_cb=None, user_id:
                 profile=profile,
                 news_sources=news_sources,
                 name=item.get("name") or "",
+                learned_score=learned_score,
             )
             recorder.record(prediction, user_id=user_id)
             predictions.append(prediction)
