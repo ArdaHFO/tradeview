@@ -23,6 +23,8 @@ from .storage.recorder import PredictionRecorder
 from .symbols_search import search_symbols
 from .technical.data import ALLOWED_TIMEFRAMES, fetch_bars
 from .technical.indicators import atr, bollinger_bands, ema, rsi, sma
+from .technical.scorer import score_technical
+from .learning.train import load_model
 
 log = logging.getLogger(__name__)
 COOKIE_NAME = "tradeview_session"
@@ -478,6 +480,7 @@ def create_app(cfg: Config) -> FastAPI:
         ema20 = ema(closes, 20)
         rsi14 = rsi(closes, 14)
         upper, mid, lower = bollinger_bands(closes)
+        verdict = score_technical(symbol, bars)
         return JSONResponse({
             "symbol": symbol,
             "dates": [b.ts.isoformat() for b in bars],
@@ -493,7 +496,28 @@ def create_app(cfg: Config) -> FastAPI:
             "bb_upper": upper,
             "bb_mid": mid,
             "bb_lower": lower,
+            "technical_score": round(verdict.score, 3),
+            "technical_indicators": [
+                {
+                    "name": ind.name, "value": ind.value, "direction": ind.direction.value,
+                    "weight_pct": ind.weight_pct, "explanation": ind.explanation,
+                }
+                for ind in verdict.indicators
+            ],
             "summary": _chart_summary(closes, highs, lows, rsi14),
+        })
+
+    @app.get("/api/model")
+    def api_model(user_id: int = Depends(require_user)) -> JSONResponse:
+        """The trained learned-fusion model's honest, out-of-sample report card
+        (or availability=false when no model is present)."""
+        model = load_model(_get_runtime(user_id).current_cfg().model_path)
+        if model is None:
+            return JSONResponse({"available": False})
+        return JSONResponse({
+            "available": True,
+            "meta": model.meta,
+            "weights": dict(zip(model.feature_names, model.weights)),
         })
 
     @app.get("/api/settings")
@@ -753,6 +777,9 @@ input[type=text]:focus{border-color:#35558b;box-shadow:0 0 0 4px rgba(108,167,25
 .field label{font-size:12px;color:var(--muted)}
 .field input,.field select{width:100%;background:rgba(255,255,255,.04);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:13px;outline:none}
 .field input:focus,.field select:focus{border-color:#35558b;box-shadow:0 0 0 4px rgba(108,167,255,.12)}
+/* native dropdown list was rendering white-on-white — force dark, readable options */
+select,select option{color:var(--text);background:var(--panel2)}
+select option{background:#13213a;color:#e7eefb}
 table{width:100%;border-collapse:collapse}th,td{padding:11px 10px;border-bottom:1px solid rgba(255,255,255,.06);vertical-align:top;text-align:left}th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}td{color:#dce7f8}
 .up{color:var(--green);font-weight:700}.down{color:var(--red);font-weight:700}.neutral{color:var(--muted);font-weight:700}.reasons,.muted{color:var(--muted)}.empty{color:var(--muted);padding:18px 10px;font-style:italic;text-align:center}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:12px}.legend span{display:inline-flex;align-items:center;gap:6px}.dot{width:10px;height:10px;border-radius:999px;display:inline-block}
@@ -815,6 +842,20 @@ tr.selected td{background:rgba(108,167,255,.14)!important}
 .levels .lv .k{font-size:10px;color:var(--muted)}
 .levels .lv .v{font-size:13px;font-weight:700;margin-top:2px}
 .chart-toggle{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+/* model weight bars (diverging from center) */
+.wrow{display:flex;align-items:center;gap:10px;margin:7px 0}
+.wrow .wl{width:96px;font-size:12px;color:var(--muted);text-align:right;flex:none}
+.wrow .wt{flex:1;height:14px;background:rgba(255,255,255,.05);border-radius:6px;position:relative}
+.wrow .wt .z{position:absolute;left:50%;top:-2px;bottom:-2px;width:1px;background:rgba(255,255,255,.18)}
+.wrow .wt i{position:absolute;top:0;height:100%;border-radius:5px}
+.wrow .wv{width:52px;font-size:11px;font-weight:700;flex:none}
+/* trade plan (buy/sell levels) */
+.plan{width:100%;border-collapse:collapse;margin-top:4px}
+.plan th,.plan td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,.06);text-align:left;font-size:13px}
+.plan th{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.plan .tag-buy{color:var(--green);font-weight:800}
+.plan .tag-sell{color:var(--red);font-weight:800}
+.plan tr.cur td{background:rgba(108,167,255,.10);font-weight:700}
 details.settings summary{cursor:pointer;font-size:15px;font-weight:700;list-style:none;display:flex;align-items:center;gap:8px}
 details.settings summary::-webkit-details-marker{display:none}
 details.settings summary::before{content:"▸";color:var(--muted);transition:transform .15s}
@@ -1007,6 +1048,14 @@ details.settings[open] summary::before{transform:rotate(90deg)}
       <canvas id="barChart"></canvas>
     </div>
 
+    <div class="card panel" data-tab="panom" id="modelCard">
+      <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px">
+        <h3 style="margin:0">🤖 Yapay Zekâ Modeli — Öğrenme Sonucu</h3>
+        <span class="muted" style="font-size:12px">≈3 aylık yön modeli · gerçek (out-of-sample) sonuçlar</span>
+      </div>
+      <div id="modelBody"><div class="muted">Yükleniyor…</div></div>
+    </div>
+
     <div class="card panel is-hidden" id="compareCard" data-tab="analiz">
       <h3 style="margin:0 0 4px">⚖ Hisse Karşılaştırma</h3>
       <div class="sub" style="margin-bottom:10px">Bu çalıştırmada analiz edilen semboller yan yana.</div>
@@ -1041,6 +1090,9 @@ details.settings[open] summary::before{transform:rotate(90deg)}
       <canvas id="detailChartCanvas"></canvas>
       <div class="section-title" style="margin-top:14px">📐 Önemli Seviyeler <span class="muted" style="font-weight:400;font-size:12px">— pivot (son bar) ve Fibonacci geri çekilme</span></div>
       <div id="detailLevels"></div>
+
+      <div class="section-title" style="margin-top:14px">🎯 İşlem Planı — Nereden Al, Nereden Sat <span class="muted" style="font-weight:400;font-size:12px">— destek/direnç · pivot · Fibonacci seviyelerinden üretildi</span></div>
+      <div id="detailPlan"></div>
 
       <div class="section-title">📉 RSI (14) — Momentum <span class="muted" style="font-weight:400;font-size:12px">— 70 üzeri aşırı alım, 30 altı aşırı satım</span></div>
       <canvas id="detailRsiCanvas" style="height:170px!important"></canvas>
@@ -1503,7 +1555,7 @@ async function loadHistory(){
   // and whichever of the two async calls finished last silently won.
   const r = await fetch('/api/history?days=7');
   const s = await r.json();
-  document.getElementById('history').innerHTML = s.recent.length ? s.recent.map(p => `<tr>
+  document.getElementById('history').innerHTML = s.recent.length ? s.recent.map(p => `<tr class="row-clickable" onclick='openHistoryDetail(${JSON.stringify(p).replace(/'/g, "&#39;")})'>
     <td>${new Date(p.ts).toLocaleString('tr-TR')}</td>
     <td><b>${esc(p.symbol)}</b></td>
     <td class="${dirClass(p.final_direction)}">${dirLabel(p.final_direction)}</td>
@@ -1704,20 +1756,43 @@ function highlightResultRow(idx){
   if (row) row.classList.add('active');
 }
 
-async function openDetail(idx, scroll){
+let detailToken = 0;
+
+function openDetail(idx, scroll){
   const p = lastResults[idx];
   if (!p) return;
   currentDetailIdx = idx;
+  highlightResultRow(idx);
+  document.getElementById('detailSwitch').textContent =
+    lastResults.length > 1 ? 'Tablodan başka bir karta tıklayarak değiştirebilirsiniz' : '';
+  showDetailFor(p, scroll);
+}
+
+// Open a stored (history) prediction: same panel, live chart/news/indicators.
+function openHistoryDetail(row){
+  currentDetailIdx = -1;
+  highlightResultRow(-1);
+  showTab('analiz');
+  document.getElementById('detailSwitch').textContent = 'Geçmiş tahmin — grafik ve haberler güncel veriyle yenilenir';
+  showDetailFor({
+    symbol: row.symbol, name: '', timeframe: row.timeframe || '1d', profile: row.profile || 'balanced',
+    final_score: row.final_score ?? 0, final_direction: row.final_direction || 'NEUTRAL',
+    final_confidence: row.final_confidence ?? 0, news_score: row.news_score ?? 0,
+    news_confidence: row.news_confidence ?? 0, news_rationale: row.news_rationale || '',
+    technical_score: row.technical_score ?? 0, technical_indicators: [],
+    price_at_prediction: row.price_at_prediction ?? null, news_sources: row.news_sources || 'google',
+  }, true);
+}
+
+async function showDetailFor(p, scroll){
   const panel = document.getElementById('detailPanel');
   panel.classList.remove('is-hidden');
-  highlightResultRow(idx);
+  const token = ++detailToken;
 
   // Instant (no-fetch) parts render immediately.
   document.getElementById('detailTitle').textContent = `📊 ${p.symbol}${p.name ? ' — ' + p.name : ''}`;
   document.getElementById('detailSub').textContent =
     `${p.timeframe} · ${p.profile} · analiz anı fiyatı ${formatPrice(p.symbol, p.price_at_prediction)}`;
-  document.getElementById('detailSwitch').textContent =
-    lastResults.length > 1 ? 'Tablodan başka bir satıra tıklayarak değiştirebilirsiniz' : '';
   document.getElementById('detailVerdict').innerHTML = verdictBanner(p);
   document.getElementById('detailScores').innerHTML =
     scoreBadge('Final Skor', p.final_score, p.final_confidence) +
@@ -1728,6 +1803,8 @@ async function openDetail(idx, scroll){
   document.getElementById('detailNewsRationale').textContent = p.news_rationale || 'Yorum yok.';
   document.getElementById('detailSummary').innerHTML = '';
   document.getElementById('detailPosition').innerHTML = '';
+  document.getElementById('detailLevels').innerHTML = '';
+  document.getElementById('detailPlan').innerHTML = '';
   document.getElementById('detailNews').innerHTML = '<div class="muted">Haberler yükleniyor...</div>';
 
   if (scroll) panel.scrollIntoView({behavior:'smooth', block:'start'});
@@ -1736,16 +1813,23 @@ async function openDetail(idx, scroll){
   const newsUrl = `/api/news?symbol=${encodeURIComponent(p.symbol)}&name=${encodeURIComponent(p.name || p.symbol)}&sources=${encodeURIComponent(sources)}`;
   const chartUrl = `/api/chart?symbol=${encodeURIComponent(p.symbol)}&timeframe=${encodeURIComponent(p.timeframe || '1d')}`;
 
-  const openedFor = currentDetailIdx;
   const [newsResp, chartResp] = await Promise.all([fetch(newsUrl), fetch(chartUrl)]);
   const news = await newsResp.json();
   const chartData = await chartResp.json();
-  // If the user clicked another row while this was loading, don't clobber it.
-  if (openedFor !== currentDetailIdx) return;
+  if (token !== detailToken) return;  // a newer open won the race
 
   const sm = chartData.summary || {};
   document.getElementById('detailSummary').innerHTML = statStrip(p.symbol, sm);
   document.getElementById('detailPosition').innerHTML = positionBar(p.symbol, sm);
+
+  // History rows carry no indicator breakdown — fill it from the fresh calc.
+  if ((!p.technical_indicators || !p.technical_indicators.length) && (chartData.technical_indicators || []).length){
+    document.getElementById('detailIndicators').innerHTML = renderIndicatorCards(chartData.technical_indicators);
+    document.getElementById('detailTechSummary').innerHTML = techSummaryText({
+      technical_score: chartData.technical_score ?? 0, final_direction: p.final_direction,
+      technical_indicators: chartData.technical_indicators,
+    });
+  }
 
   document.getElementById('detailNews').innerHTML = news.length ? news.map(a => `
     <div class="news-item">
@@ -1757,6 +1841,7 @@ async function openDetail(idx, scroll){
   lastChartSym = p.symbol;
   renderDetailChart();
   renderLevels(p.symbol, sm);
+  renderTradePlan(p.symbol, sm);
 
   const labels = (chartData.dates || []).map(d => new Date(d).toLocaleDateString('tr-TR'));
   const n = (chartData.close || []).length;
@@ -1853,6 +1938,81 @@ function renderLevels(sym, sm){
   box.innerHTML = html;
 }
 
+// Turn the technical levels into a concrete "buy below / sell above" ladder.
+function renderTradePlan(sym, sm){
+  const box = document.getElementById('detailPlan');
+  if (!sm || sm.last == null){ box.innerHTML = '<div class="muted">Plan için yeterli veri yok.</div>'; return; }
+  const last = sm.last;
+  const levels = [];
+  const seen = new Set();
+  const push = (price, label) => {
+    if (price == null || !isFinite(price)) return;
+    const key = Number(price).toFixed(2);
+    if (seen.has(key)) return;
+    seen.add(key);
+    levels.push({price: Number(price), label});
+  };
+  push(sm.resistance, 'Direnç'); push(sm.support, 'Destek');
+  push(sm.period_high, 'Dönem zirvesi'); push(sm.period_low, 'Dönem dibi');
+  if (sm.pivot){ push(sm.pivot.r2, 'Pivot R2'); push(sm.pivot.r1, 'Pivot R1'); push(sm.pivot.p, 'Pivot P'); push(sm.pivot.s1, 'Pivot S1'); push(sm.pivot.s2, 'Pivot S2'); }
+  if (sm.fib){ ['0', '23.6', '38.2', '50', '61.8', '100'].forEach(k => push(sm.fib[k], 'Fib %' + k)); }
+
+  const dist = (pr) => (pr / last - 1) * 100;
+  const sells = levels.filter(x => x.price > last).sort((a, b) => a.price - b.price).slice(0, 5);
+  const buys = levels.filter(x => x.price <= last).sort((a, b) => b.price - a.price).slice(0, 5);
+  const row = (tip, cls, x) => `<tr><td class="${cls}">${tip}</td><td>${formatPrice(sym, x.price)}</td><td class="muted">${esc(x.label)}</td><td style="color:${dist(x.price) >= 0 ? 'var(--green)' : 'var(--red)'}">${dist(x.price) >= 0 ? '+' : ''}${dist(x.price).toFixed(1)}%</td></tr>`;
+  const sellRows = sells.slice().sort((a, b) => b.price - a.price).map(x => row('SAT', 'tag-sell', x)).join('');
+  const buyRows = buys.map(x => row('AL', 'tag-buy', x)).join('');
+  const curRow = `<tr class="cur"><td>◆ ŞİMDİ</td><td>${formatPrice(sym, last)}</td><td class="muted">güncel fiyat</td><td>—</td></tr>`;
+  const stop = sm.atr ? last - 1.5 * sm.atr : null;
+  const stopNote = stop ? `<div class="muted" style="font-size:12px;margin-top:8px">🛑 Önerilen stop (uzun pozisyon, 1.5×ATR): <b>${formatPrice(sym, stop)}</b> (${(dist(stop)).toFixed(1)}%)</div>` : '';
+  box.innerHTML = `<table class="plan"><thead><tr><th>Tip</th><th>Seviye</th><th>Kaynak</th><th>Uzaklık</th></tr></thead>
+    <tbody>${sellRows}${curRow}${buyRows}</tbody></table>${stopNote}
+    <div class="muted" style="font-size:11px;margin-top:8px">🟢 AL = fiyatın altındaki destek/geri-çekilme bölgeleri · 🔴 SAT = üstteki direnç/hedefler. Teknik referanslardır, yatırım tavsiyesi değildir.</div>`;
+}
+
+// Show the learned model's honest report card.
+async function loadModelInfo(){
+  const box = document.getElementById('modelBody');
+  let d = {available: false};
+  try { const r = await fetch('/api/model'); if (r.ok) d = await r.json(); } catch (e) {}
+  if (!d.available){
+    box.innerHTML = '<div class="muted">Henüz eğitilmiş model yok. Sunucuda <code>python main.py train --universe all</code> ile eğitilir; "Öğrenen model" profili o zaman devreye girer.</div>';
+    return;
+  }
+  const m = d.meta || {};
+  const acc = (m.accuracy != null) ? (m.accuracy * 100).toFixed(1) : '—';
+  const base = (m.baseline_accuracy != null) ? (m.baseline_accuracy * 100).toFixed(1) : '—';
+  const auc = (m.auc != null) ? m.auc.toFixed(3) : '—';
+  const edge = (m.accuracy != null && m.baseline_accuracy != null) ? '+' + ((m.accuracy - m.baseline_accuracy) * 100).toFixed(1) + ' puan' : '—';
+  const when = m.trained_at ? new Date(m.trained_at).toLocaleString('tr-TR') : '—';
+  const cell = (k, v, extra = '') => `<div class="cell"><div class="k">${k}</div><div class="v" ${extra}>${v}</div></div>`;
+  const strip = '<div class="statstrip">'
+    + cell('Doğruluk (test)', '%' + acc, 'style="color:var(--green)"')
+    + cell('Baseline (trend)', '%' + base)
+    + cell('Kenar (edge)', edge)
+    + cell('AUC', auc)
+    + cell('Test örneği', (m.n_test || 0).toLocaleString('tr-TR'))
+    + cell('Ufuk', (m.horizon || '—') + ' bar (~3 ay)')
+    + '</div>';
+  const w = d.weights || {};
+  const names = Object.keys(w);
+  const maxW = Math.max(0.0001, ...names.map(n => Math.abs(w[n])));
+  const bars = names.sort((a, b) => Math.abs(w[b]) - Math.abs(w[a])).map(n => {
+    const val = w[n];
+    const half = Math.abs(val) / maxW * 50;
+    const seg = val >= 0
+      ? `<i style="left:50%;width:${half}%;background:var(--green)"></i>`
+      : `<i style="left:${50 - half}%;width:${half}%;background:var(--red)"></i>`;
+    return `<div class="wrow"><div class="wl">${esc(n)}</div><div class="wt"><div class="z"></div>${seg}</div><div class="wv" style="color:${val >= 0 ? 'var(--green)' : 'var(--red)'}">${val >= 0 ? '+' : ''}${val.toFixed(3)}</div></div>`;
+  }).join('');
+  box.innerHTML = strip
+    + `<div class="muted" style="font-size:12px;margin:14px 0 4px">Öğrenilen sinyal ağırlıkları (yeşil = yükselişe, kırmızı = düşüşe katkı):</div>${bars}`
+    + `<div class="muted" style="font-size:12px;margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:rgba(244,185,66,.06)">
+        ⚠️ <b>Dürüst not:</b> Bu ≈3 aylık yön için <b>gerçek (out-of-sample)</b> bir sonuçtur ve trend-takip baseline'ını <b>${edge}</b> geçer. Piyasa gürültülü olduğundan hiçbir teknik model %90+ isabet <i>veremez</i> — öyle bir sayı görürseniz o model geleceğe bakıyordur (veri sızıntısı). Daha yükseği için temel analiz + piyasa rejimi verisi gerekir.
+      </div>`;
+}
+
 async function loginUser(){
     const payload = {username: document.getElementById('auth_username').value, password: document.getElementById('auth_password').value};
     const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
@@ -1912,6 +2072,10 @@ async function initializeForSession(){
     await loadSettings();
     await loadHistory();
     await loadDashboard();
+    await loadModelInfo();
+    // Restore the last analysis of this session (server keeps it in memory), so
+    // reopening the tab doesn't lose the results.
+    await refreshState();
 }
 
 initializeForSession();

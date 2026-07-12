@@ -32,6 +32,8 @@ class LogisticRegression:
         # better behaved when inputs are on a common scale.
         self.mean = [0.0] * m
         self.std = [1.0] * m
+        # Training report (accuracy/auc/…) so the UI can show honest numbers.
+        self.meta: dict = {}
 
     # -- standardisation --------------------------------------------------
     def _fit_scaler(self, X: list[list[float]]) -> None:
@@ -101,6 +103,7 @@ class LogisticRegression:
             "bias": self.bias,
             "mean": self.mean,
             "std": self.std,
+            "meta": self.meta,
         }
 
     @classmethod
@@ -110,6 +113,7 @@ class LogisticRegression:
         model.bias = float(d["bias"])
         model.mean = list(d["mean"])
         model.std = list(d["std"])
+        model.meta = dict(d.get("meta", {}))
         return model
 
     def save(self, path: str) -> None:

@@ -527,7 +527,8 @@ class PredictionRecorder:
         self._use_dict_rows()
         cur = self._execute(
             "SELECT ts, symbol, timeframe, profile, final_score, final_direction,"
-            " final_confidence, actual_direction, hit FROM predictions"
+            " final_confidence, news_score, news_confidence, news_rationale,"
+            " technical_score, price_at_prediction, actual_direction, hit FROM predictions"
             " WHERE user_id = ? ORDER BY id DESC LIMIT ?",
             (scoped_user_id, limit),
         )

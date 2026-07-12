@@ -73,6 +73,20 @@ def train_and_evaluate(symbols: list[str], cfg: Config, timeframe: str = "1d",
                       and report["model"]["auc"] > 0.5)
     report["beats_baseline"] = beats_baseline
     report["saved"] = False
+    # Embed a compact, honest summary in the model file so the UI can show it.
+    from datetime import datetime, timezone
+    model.meta = {
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "horizon": horizon,
+        "symbols": report["symbols"],
+        "n_train": report["n_train"],
+        "n_test": report["n_test"],
+        "accuracy": report["model"]["accuracy"],
+        "auc": report["model"]["auc"],
+        "brier": report["model"]["brier"],
+        "baseline_accuracy": report["baseline_trend"]["accuracy"],
+        "weights": report["weights"],
+    }
     if save_path and beats_baseline:
         model.save(save_path)
         report["saved"] = True
