@@ -22,6 +22,14 @@ def test_list_universes_shape():
         assert u["count"] > 0 and u["label"]
 
 
+def test_universe_symbols_shape():
+    rows = screener.universe_symbols("bist")
+    assert rows and all(set(r) == {"symbol", "name"} for r in rows)
+    assert rows[0]["symbol"].endswith(".IS")
+    # Unknown key falls back to a valid list rather than raising.
+    assert screener.universe_symbols("does-not-exist")
+
+
 def test_signal_label_thresholds():
     assert screener._signal_label(0.8) == "Güçlü Al"
     assert screener._signal_label(0.2) == "Al"

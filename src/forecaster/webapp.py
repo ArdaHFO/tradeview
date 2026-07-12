@@ -18,7 +18,7 @@ from .config import Config
 from .models import Prediction
 from .news.fetch import available_sources, fetch_articles
 from .pipeline import load_watchlist, run_for_symbols
-from .screener import list_universes, scan as screener_scan
+from .screener import list_universes, scan as screener_scan, universe_symbols
 from .storage.recorder import PredictionRecorder
 from .symbols_search import search_symbols
 from .technical.data import ALLOWED_TIMEFRAMES, fetch_bars
@@ -429,6 +429,11 @@ def create_app(cfg: Config) -> FastAPI:
     def api_screener_universes(_: int = Depends(require_user)) -> JSONResponse:
         return JSONResponse(list_universes())
 
+    @app.get("/api/stocks")
+    def api_stocks(exchange: str = "bist", _: int = Depends(require_user)) -> JSONResponse:
+        """Browsable list of the supported symbols for one exchange/universe."""
+        return JSONResponse(universe_symbols(exchange))
+
     @app.get("/api/screener")
     def api_screener(universe: str = "bist", timeframe: str = "1d",
                      user_id: int = Depends(require_user)) -> JSONResponse:
@@ -811,7 +816,41 @@ details.settings summary{cursor:pointer;font-size:15px;font-weight:700;list-styl
 details.settings summary::-webkit-details-marker{display:none}
 details.settings summary::before{content:"▸";color:var(--muted);transition:transform .15s}
 details.settings[open] summary::before{transform:rotate(90deg)}
-@media (max-width:1000px){.stat,.half{grid-column:span 12}.settings-grid{grid-template-columns:repeat(2,1fr)}.statstrip{grid-template-columns:repeat(3,1fr)}.ind-cards{grid-template-columns:1fr}.levels{grid-template-columns:repeat(3,1fr)}}
+/* tab navigation */
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;border-bottom:1px solid var(--line)}
+.tabs button{background:transparent;border:0;border-bottom:2px solid transparent;color:var(--muted);padding:11px 16px;font-size:14px;font-weight:600;cursor:pointer;border-radius:10px 10px 0 0;margin-bottom:-1px}
+.tabs button:hover{color:var(--text);background:rgba(255,255,255,.03)}
+.tabs button.active{color:var(--text);border-bottom-color:var(--blue)}
+.tabhide,.is-hidden{display:none!important}
+/* browse popular stocks */
+.browse{margin-top:14px;border-top:1px solid rgba(255,255,255,.06);padding-top:12px}
+.browse-list{display:flex;flex-wrap:wrap;gap:8px;max-height:190px;overflow-y:auto;margin-top:10px}
+.stock-chip{display:inline-flex;flex-direction:column;gap:1px;padding:7px 12px;border-radius:12px;border:1px solid var(--line);background:rgba(255,255,255,.04);cursor:pointer;transition:border-color .15s,background .15s}
+.stock-chip:hover{border-color:#4d7fd6;background:rgba(108,167,255,.14)}
+.stock-chip .s{font-weight:700;font-size:13px}
+.stock-chip .n{font-size:11px;color:var(--muted)}
+/* result cards */
+.result-cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.rcard{background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.015));border:1px solid var(--line);border-radius:16px;padding:14px;cursor:pointer;transition:border-color .15s,transform .15s,box-shadow .15s;border-left:4px solid var(--muted)}
+.rcard:hover{border-color:#35558b;transform:translateY(-2px);box-shadow:0 12px 28px rgba(0,0,0,.25)}
+.rcard.up{border-left-color:var(--green)}.rcard.down{border-left-color:var(--red)}.rcard.neutral{border-left-color:var(--muted)}
+.rcard.active{border-color:var(--blue);box-shadow:0 0 0 2px rgba(108,167,255,.3)}
+.rcard .rc-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.rcard .rc-sym{font-size:17px;font-weight:800}
+.rcard .rc-meta{font-size:11px;color:var(--muted);margin-top:2px}
+.rcard .rc-scores{display:flex;gap:8px;margin-top:12px}
+.rcard .rc-s{flex:1;background:rgba(255,255,255,.04);border-radius:10px;padding:7px 8px;text-align:center}
+.rcard .rc-s .k{font-size:10px;color:var(--muted)}
+.rcard .rc-s .v{font-size:15px;font-weight:700;margin-top:2px}
+.rcard .rc-conf{margin-top:10px}
+.rcard .rc-conf .cbar{height:6px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:4px}
+.rcard .rc-conf .cbar i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--amber),var(--green))}
+/* chart empty state + primary action bar */
+.chart-empty{display:flex;align-items:center;justify-content:center;min-height:220px;color:var(--muted);font-style:italic;text-align:center;padding:0 24px}
+.actionbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.btn.primary{background:linear-gradient(180deg,#7db0ff,#4d7fd6);color:#04101f;box-shadow:0 6px 16px rgba(108,167,255,.28)}
+.action-hint{font-size:12px;color:var(--muted);margin-top:8px}
+@media (max-width:1000px){.stat,.half{grid-column:span 12}.settings-grid{grid-template-columns:repeat(2,1fr)}.statstrip{grid-template-columns:repeat(3,1fr)}.ind-cards{grid-template-columns:1fr}.levels{grid-template-columns:repeat(3,1fr)}.result-cards{grid-template-columns:1fr}}
 </style></head><body>
 <div class="wrap">
   <div class="hero">
@@ -840,19 +879,33 @@ details.settings[open] summary::before{transform:rotate(90deg)}
 
     <div id="app_shell" style="display:none">
 
-  <div class="grid">
-    <div class="card stat"><div class="l">Son 30 Gün İsabet Oranı</div><div id="statHit" class="v">-</div></div>
-    <div class="card stat"><div class="l">Favori Sayısı</div><div id="statWatchlist" class="v">-</div></div>
-    <div class="card stat"><div class="l">Son Kullanılan Profil</div><div id="statModel" class="v">-</div></div>
-    <div class="card stat"><div class="l">Son Kullanılan Zaman Dilimi</div><div id="statTf" class="v">-</div></div>
+  <nav class="tabs" id="tabnav">
+    <button data-goto="analiz" class="active" onclick="showTab('analiz')">🔍 Analiz</button>
+    <button data-goto="tarayici" onclick="showTab('tarayici')">🔎 Tarayıcı</button>
+    <button data-goto="panom" onclick="showTab('panom')">📊 Panom</button>
+    <button data-goto="ayarlar" onclick="showTab('ayarlar')">⚙️ Ayarlar</button>
+  </nav>
 
-    <div class="card search">
+  <div class="grid">
+    <div class="card stat" data-tab="panom"><div class="l">Son 30 Gün İsabet Oranı</div><div id="statHit" class="v">-</div></div>
+    <div class="card stat" data-tab="panom"><div class="l">Favori Sayısı</div><div id="statWatchlist" class="v">-</div></div>
+    <div class="card stat" data-tab="panom"><div class="l">Son Kullanılan Profil</div><div id="statModel" class="v">-</div></div>
+    <div class="card stat" data-tab="panom"><div class="l">Son Kullanılan Zaman Dilimi</div><div id="statTf" class="v">-</div></div>
+
+    <div class="card search" data-tab="analiz">
       <div class="row" style="justify-content:space-between;margin-bottom:10px">
         <div class="muted">Dünyanın herhangi bir borsasından sembol veya şirket adı ara (ör. AAPL, ASELS, THYAO, SAP, MC), seç ve analiz et.</div>
         <div class="legend"><span><i class="dot" style="background:var(--green)"></i> Yükseliş</span><span><i class="dot" style="background:var(--red)"></i> Düşüş</span><span><i class="dot" style="background:var(--muted)"></i> Nötr</span></div>
       </div>
       <input type="text" id="q" placeholder="AAPL, ASELS, THYAO, SAP, MC, Apple, Tesla..." autocomplete="off">
       <div id="dd" class="dropdown" style="display:none"></div>
+      <div class="browse">
+        <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+          <div class="muted" style="font-size:13px">📋 Adını hatırlamıyor musun? Desteklenen borsalardan göz atıp seç:</div>
+          <div class="toggle-group" id="browse_ex"></div>
+        </div>
+        <div class="browse-list" id="browse_list"><span class="muted" style="font-size:12px">Yükleniyor…</span></div>
+      </div>
       <div class="row" style="margin-top:12px;gap:16px;flex-wrap:wrap">
         <div class="field" style="min-width:220px">
           <label>Zaman dilimi (yeni eklenecek semboller için)</label>
@@ -879,20 +932,21 @@ details.settings[open] summary::before{transform:rotate(90deg)}
           <div class="toggle-group" id="src_controls"><span class="muted" style="font-size:12px">Yükleniyor…</span></div>
         </div>
       </div>
-      <div class="row" style="margin-top:12px;justify-content:space-between">
-        <div class="chips" id="chips"></div>
-        <div class="row">
-          <button class="btn good" id="go" onclick="analyze()">▶ Analiz Et</button>
-          <button class="btn alt" onclick="compareModels()">⚖ Profil Karşılaştır</button>
-          <button class="btn alt" onclick="multiTimeframe()">⏱ Çok Zaman Dilimi</button>
-          <button class="btn alt" onclick="saveWatchlist()">★ Favorilere Ekle</button>
-          <button class="btn alt" onclick="loadDashboard()">↻ Panoyu Yenile</button>
+      <div style="margin-top:14px">
+        <div class="chips" id="chips" style="margin-bottom:12px"></div>
+        <div class="actionbar">
+          <button class="btn primary" id="go" onclick="analyze()">▶ Analiz Et</button>
+          <button class="btn alt analysis-btn" id="btnCompare" onclick="compareModels()" title="Seçili hisseleri 3 profille (dengeli / haber ağırlıklı / teknik ağırlıklı) analiz edip yan yana karşılaştırır">⚖ Profilleri Karşılaştır</button>
+          <button class="btn alt analysis-btn" id="btnMulti" onclick="multiTimeframe()" title="Seçili zaman dilimlerinin her biri için ayrı analiz üretir (ör. 1 gün + 1 hafta)">⏱ Çoklu Zaman Dilimi</button>
+          <span style="flex:1"></span>
+          <button class="btn alt" onclick="saveWatchlist()" title="Seçili hisseleri favori listene kaydeder">★ Favorilere Ekle</button>
         </div>
+        <div class="action-hint" id="actionHint">Bir veya daha fazla hisse seç, sonra <b>Analiz Et</b>. Karşılaştırma ve çoklu zaman dilimi de aynı seçimi kullanır.</div>
       </div>
       <div id="progress" class="sub" style="margin-top:10px"></div>
     </div>
 
-    <div class="card panel">
+    <div class="card panel" data-tab="tarayici">
       <div class="row" style="justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:10px">
         <div>
           <h3 style="margin:0">🔎 Piyasa Tarayıcı — Bugünün Sinyalleri</h3>
@@ -918,7 +972,7 @@ details.settings[open] summary::before{transform:rotate(90deg)}
       <div id="scr_status" class="sub" style="margin-top:8px"></div>
     </div>
 
-        <details class="card panel settings">
+        <details class="card panel settings" data-tab="ayarlar" open>
             <summary>⚙️ Uygulama Ayarları <span class="muted" style="font-weight:400;font-size:12px">— AI modeli, ağırlıklar, veri ufku (aç/kapat)</span></summary>
             <div class="settings-grid" style="margin-top:12px">
                 <div class="field"><label>AI Modeli</label><input id="set_groq_model" type="text"></div>
@@ -938,10 +992,18 @@ details.settings[open] summary::before{transform:rotate(90deg)}
             <div id="settings_status" class="sub" style="margin-top:8px"></div>
         </details>
 
-    <div class="card half"><h3 style="margin:0 0 10px">📈 Performans (Kümülatif İsabet Oranı)</h3><canvas id="hitChart"></canvas></div>
-    <div class="card half"><h3 style="margin:0 0 10px">📊 Profil / Zaman Dilimi Bazında İsabet</h3><canvas id="barChart"></canvas></div>
+    <div class="card half" data-tab="panom">
+      <h3 style="margin:0 0 10px">📈 Performans — Kümülatif İsabet Oranı</h3>
+      <div id="hitEmpty" class="chart-empty is-hidden">Henüz sonuçlanmış tahmin yok. Analiz yaptıkça ve tahminler ertesi kapanışla eşleştikçe isabet eğrin burada oluşur.</div>
+      <canvas id="hitChart"></canvas>
+    </div>
+    <div class="card half" data-tab="panom">
+      <h3 style="margin:0 0 10px">📊 Profil / Zaman Dilimi Bazında İsabet</h3>
+      <div id="barEmpty" class="chart-empty is-hidden">Profil ve zaman dilimi bazında isabet oranları, yeterli sonuçlanmış tahmin biriktiğinde görünür.</div>
+      <canvas id="barChart"></canvas>
+    </div>
 
-    <div class="card panel" id="compareCard" style="display:none">
+    <div class="card panel is-hidden" id="compareCard" data-tab="analiz">
       <h3 style="margin:0 0 4px">⚖ Hisse Karşılaştırma</h3>
       <div class="sub" style="margin-bottom:10px">Bu çalıştırmada analiz edilen semboller yan yana.</div>
       <canvas id="compareChartCanvas" style="margin-bottom:14px"></canvas>
@@ -949,11 +1011,11 @@ details.settings[open] summary::before{transform:rotate(90deg)}
       <tbody id="compareTable"></tbody></table>
     </div>
 
-    <div class="card panel"><h3 style="margin:0 0 10px">🔍 Son Analiz Sonuçları <span class="muted" style="font-weight:400;font-size:12px">— bir satıra tıklayınca aşağıdaki panelde grafikleri ve göstergeleri açar</span></h3>
-      <table><thead><tr><th>Sembol</th><th>Zaman Dilimi</th><th>Profil</th><th>Yön</th><th>Final</th><th>Güven</th><th>Haber</th><th>Teknik</th><th>Detay</th></tr></thead><tbody id="results"><tr><td colspan="9" class="empty">Henüz analiz yok — yukarıdan bir sembol seçip "Analiz Et" butonuna basın.</td></tr></tbody></table>
+    <div class="card panel" data-tab="analiz"><h3 style="margin:0 0 10px">🔍 Son Analiz Sonuçları <span class="muted" style="font-weight:400;font-size:12px">— bir karta tıklayınca aşağıda grafikleri ve göstergeleri açar</span></h3>
+      <div id="results" class="result-cards"><div class="empty" style="grid-column:1/-1">Henüz analiz yok — yukarıdan bir sembol seçip "Analiz Et" butonuna basın.</div></div>
     </div>
 
-    <div class="card panel" id="detailPanel" style="display:none">
+    <div class="card panel is-hidden" id="detailPanel" data-tab="analiz">
       <div class="detail-head">
         <div>
           <h3 id="detailTitle" style="margin:0">—</h3>
@@ -990,8 +1052,8 @@ details.settings[open] summary::before{transform:rotate(90deg)}
       <div id="detailNews"><div class="muted">Yükleniyor...</div></div>
     </div>
 
-    <div class="card half"><h3 style="margin:0 0 10px">★ Favori Listem</h3><table><thead><tr><th>Sembol</th><th>Ad</th><th>Profil / Zaman Dilimi</th><th>Kaynak</th></tr></thead><tbody id="watchlist"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
-    <div class="card half"><h3 style="margin:0 0 10px">🕓 Geçmiş Tahminler</h3><table><thead><tr><th>Zaman</th><th>Sembol</th><th>Yön</th><th>İsabet</th></tr></thead><tbody id="history"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
+    <div class="card half" data-tab="panom"><h3 style="margin:0 0 10px">★ Favori Listem</h3><table><thead><tr><th>Sembol</th><th>Ad</th><th>Profil / Zaman Dilimi</th><th>Kaynak</th></tr></thead><tbody id="watchlist"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
+    <div class="card half" data-tab="panom"><h3 style="margin:0 0 10px">🕓 Geçmiş Tahminler</h3><table><thead><tr><th>Zaman</th><th>Sembol</th><th>Yön</th><th>İsabet</th></tr></thead><tbody id="history"><tr><td colspan="4" class="empty">Yükleniyor...</td></tr></tbody></table></div>
     </div>
 
     </div>
@@ -1165,14 +1227,21 @@ function renderChips(){
 }
 
 async function postAnalyze(url, payload){
+  // Immediate feedback so it's obvious the click registered.
+  document.getElementById('go').disabled = true;
+  document.querySelectorAll('.analysis-btn').forEach(b => b.disabled = true);
+  document.getElementById('progress').textContent = 'Başlatılıyor…';
   const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
   if (!r.ok){
     const err = await r.json().catch(() => ({}));
+    document.getElementById('go').disabled = false;
+    document.querySelectorAll('.analysis-btn').forEach(b => b.disabled = false);
+    document.getElementById('progress').textContent = '';
     alert(errDetail(err) || 'İşlem başlatılamadı.');
     return false;
   }
   const data = await r.json();
-  if (data.started) startPolling();
+  if (data.started){ showTab('analiz'); startPolling(); }
   return true;
 }
 
@@ -1180,9 +1249,14 @@ function selectedPayload(){
   return {symbols: selected.map(s => ({symbol:s.symbol, name:s.name, timeframe:s.timeframe, profile:s.profile, news_sources:s.news_sources}))};
 }
 
-async function analyze(){ if (selected.length) await postAnalyze('/api/analyze', selectedPayload()); }
-async function compareModels(){ if (selected.length) await postAnalyze('/api/analyze/compare', selectedPayload()); }
-async function multiTimeframe(){ if (selected.length) await postAnalyze('/api/analyze/multi', selectedPayload()); }
+function requireSelection(){
+  if (selected.length) return true;
+  document.getElementById('actionHint').innerHTML = '⚠️ Önce en az bir hisse seç (yukarıdaki kutudan ara ya da borsa listesinden tıkla).';
+  return false;
+}
+async function analyze(){ if (requireSelection()) await postAnalyze('/api/analyze', selectedPayload()); }
+async function compareModels(){ if (requireSelection()) await postAnalyze('/api/analyze/compare', selectedPayload()); }
+async function multiTimeframe(){ if (requireSelection()) await postAnalyze('/api/analyze/multi', selectedPayload()); }
 
 async function saveWatchlist(){
   if (!selected.length) return;
@@ -1211,6 +1285,7 @@ function editWatchlist(item){
         selected.push(payload);
     }
     renderChips();
+    showTab('analiz');
 }
 
 function applySettingsToForm(settings){
@@ -1258,6 +1333,38 @@ async function saveSettings(){
     applySettingsToForm(saved);
     document.getElementById('settings_status').textContent = 'Ayarlar kaydedildi ve aktif edildi.';
     loadDashboard();
+}
+
+// ---- Tab navigation ----
+function showTab(name){
+  document.querySelectorAll('#tabnav button').forEach(b => b.classList.toggle('active', b.dataset.goto === name));
+  document.querySelectorAll('[data-tab]').forEach(el => el.classList.toggle('tabhide', el.dataset.tab !== name));
+  // A chart drawn while its tab was hidden has zero size — resize on reveal.
+  requestAnimationFrame(() => {
+    [hitChart, barChart, compareChart, detailChart, rsiChart].forEach(c => { if (c) c.resize(); });
+  });
+}
+
+// ---- Browse supported exchanges (for when a ticker isn't recalled) ----
+let browseExchange = 'bist';
+async function loadBrowseExchanges(){
+  const box = document.getElementById('browse_ex');
+  let list = [];
+  try { const r = await fetch('/api/screener/universes'); if (r.ok) list = await r.json(); } catch (e) {}
+  if (!list.length) list = [{id:'bist', label:'BIST'}, {id:'us', label:'ABD'}, {id:'eu', label:'Avrupa'}];
+  box.innerHTML = list.map((u, i) => `<label class="toggle"><input type="radio" name="brx" value="${esc(u.id)}" ${i === 0 ? 'checked' : ''} onchange="selectBrowseExchange('${esc(u.id)}')"> ${esc(u.label.replace(' Popüler', ''))}</label>`).join('');
+  browseExchange = list[0].id;
+  loadBrowseStocks(browseExchange);
+}
+function selectBrowseExchange(ex){ browseExchange = ex; loadBrowseStocks(ex); }
+async function loadBrowseStocks(ex){
+  const box = document.getElementById('browse_list');
+  box.innerHTML = '<span class="muted" style="font-size:12px">Yükleniyor…</span>';
+  let list = [];
+  try { const r = await fetch('/api/stocks?exchange=' + encodeURIComponent(ex)); if (r.ok) list = await r.json(); } catch (e) {}
+  if (!list.length){ box.innerHTML = '<span class="muted" style="font-size:12px">Liste alınamadı.</span>'; return; }
+  box.innerHTML = list.map(s => `<div class="stock-chip" onclick='pick(${JSON.stringify({symbol:s.symbol, name:s.name}).replace(/'/g, "&#39;")})'>
+    <span class="s">${esc(s.symbol)}</span><span class="n">${esc(s.name)}</span></div>`).join('');
 }
 
 // ---- Market screener ----
@@ -1328,7 +1435,7 @@ function startPolling(){
   // until new results arrive.
   currentDetailIdx = -1;
   const panel = document.getElementById('detailPanel');
-  if (panel) panel.style.display = 'none';
+  if (panel) panel.classList.add('is-hidden');
   if (pollTimer) return;
   pollTimer = setInterval(refreshState, 1500);
   refreshState();
@@ -1341,31 +1448,38 @@ function skeletonRows(cols, rows){
   return Array.from({length: rows}, () => `<tr>${cells}</tr>`).join('');
 }
 
+function skeletonCards(n){
+  return Array.from({length: n}, () => `<div class="rcard"><div class="skel" style="height:20px;width:55%"></div><div class="skel" style="height:44px;margin-top:14px"></div><div class="skel" style="height:12px;margin-top:12px;width:70%"></div></div>`).join('');
+}
+
 async function refreshState(){
   const r = await fetch('/api/state');
   const s = await r.json();
   const st = document.getElementById('status');
   st.textContent = statusLabel(s.status) + (s.progress ? ' · ' + s.progress : '');
   st.className = 'pill ' + (s.status === 'error' ? 'danger' : (s.status === 'running' ? 'warn' : 'good'));
-  document.getElementById('go').disabled = (s.status === 'running');
+  const running = s.status === 'running';
+  document.getElementById('go').disabled = running;
+  document.querySelectorAll('.analysis-btn').forEach(b => b.disabled = running);
   document.getElementById('progress').textContent = s.error ? ('Hata: ' + s.error) : (s.progress || '');
 
   const results = document.getElementById('results');
-  if (s.status === 'running' && !s.results.length){
-    results.innerHTML = skeletonRows(9, 3);
+  if (running && !s.results.length){
+    results.innerHTML = skeletonCards(3);
   } else if (s.results.length){
     lastResults = s.results;
-    results.innerHTML = s.results.map((p, i) => `<tr id="resrow-${i}" class="row-clickable" onclick="openDetail(${i}, true)">
-      <td><b>${esc(p.symbol)}</b></td>
-      <td>${esc(p.timeframe)}</td>
-      <td>${esc(p.profile)}</td>
-      <td class="${dirClass(p.final_direction)}">${dirArrow(p.final_direction)} ${dirLabel(p.final_direction)}</td>
-      <td>${p.final_score.toFixed(2)}</td>
-      <td>${p.final_confidence.toFixed(2)}</td>
-      <td>${p.news_score.toFixed(2)} (${p.news_confidence.toFixed(2)})</td>
-      <td>${p.technical_score.toFixed(2)}</td>
-      <td><button class="btn alt small" onclick="event.stopPropagation(); openDetail(${i}, true)">🔍 İncele</button></td>
-      </tr>`).join('');
+    results.innerHTML = s.results.map((p, i) => `<div id="resrow-${i}" class="rcard ${dirClass(p.final_direction)}" onclick="openDetail(${i}, true)">
+      <div class="rc-head">
+        <div><div class="rc-sym">${esc(p.symbol)}</div><div class="rc-meta">${esc(p.timeframe)} · ${esc(p.profile)}</div></div>
+        <span class="pill ${p.final_direction === 'UP' ? 'good' : (p.final_direction === 'DOWN' ? 'danger' : '')}">${dirArrow(p.final_direction)} ${dirLabel(p.final_direction)}</span>
+      </div>
+      <div class="rc-scores">
+        <div class="rc-s"><div class="k">Final</div><div class="v" style="color:${scoreColor(p.final_score)}">${p.final_score >= 0 ? '+' : ''}${p.final_score.toFixed(2)}</div></div>
+        <div class="rc-s"><div class="k">Haber</div><div class="v" style="color:${scoreColor(p.news_score)}">${p.news_score >= 0 ? '+' : ''}${p.news_score.toFixed(2)}</div></div>
+        <div class="rc-s"><div class="k">Teknik</div><div class="v" style="color:${scoreColor(p.technical_score)}">${p.technical_score >= 0 ? '+' : ''}${p.technical_score.toFixed(2)}</div></div>
+      </div>
+      <div class="rc-conf"><div class="muted" style="font-size:11px">Güven %${Math.round(p.final_confidence * 100)}</div><div class="cbar"><i style="width:${Math.round(p.final_confidence * 100)}%"></i></div></div>
+    </div>`).join('');
     renderComparison(s.results);
     // Auto-open the first result so charts + indicators show without a click.
     if (currentDetailIdx < 0 || currentDetailIdx >= s.results.length){
@@ -1373,6 +1487,8 @@ async function refreshState(){
     } else {
       highlightResultRow(currentDetailIdx);
     }
+  } else if (s.status === 'done'){
+    results.innerHTML = '<div class="empty" style="grid-column:1/-1">Sonuç bulunamadı — sembollerin fiyat verisi alınamamış olabilir.</div>';
   }
   if (s.status !== 'running' && pollTimer){ clearInterval(pollTimer); pollTimer = null; loadHistory(); loadDashboard(); }
 }
@@ -1392,6 +1508,10 @@ async function loadHistory(){
 }
 
 function chartOrUpdate(current, ctx, config){ if (current) current.destroy(); return new Chart(ctx, config); }
+function toggleChartEmpty(canvasId, emptyId, hasData){
+  document.getElementById(canvasId).classList.toggle('is-hidden', !hasData);
+  document.getElementById(emptyId).classList.toggle('is-hidden', hasData);
+}
 
 async function loadDashboard(){
   const r = await fetch('/api/dashboard?days=30');
@@ -1401,11 +1521,21 @@ async function loadDashboard(){
   document.getElementById('statModel').textContent = d.by_profile[0] ? d.by_profile[0].profile : '-';
   document.getElementById('statTf').textContent = d.by_timeframe[0] ? d.by_timeframe[0].timeframe : '-';
 
-  hitChart = chartOrUpdate(hitChart, document.getElementById('hitChart'), {
-    type:'line',
-    data:{ labels:d.hit_series.map(x => new Date(x.ts).toLocaleDateString('tr-TR')), datasets:[{label:'Kümülatif İsabet Oranı (%)', data:d.hit_series.map(x => x.running_hit_rate), borderColor:'#6ca7ff', backgroundColor:'rgba(108,167,255,.18)', tension:.3, fill:true }]},
-    options:{ responsive:true, plugins:{ legend:{display:false} }, scales:{ y:{ beginAtZero:true, max:100, grid:{ color:'rgba(255,255,255,.06)' } }, x:{ grid:{ display:false } } } }
-  });
+  // Cumulative hit-rate curve — with a soft gradient fill and a friendly empty
+  // state so a fresh account (no resolved predictions yet) doesn't show a blank.
+  const hitHasData = (d.hit_series || []).length > 0;
+  toggleChartEmpty('hitChart', 'hitEmpty', hitHasData);
+  if (hitHasData){
+    const hcx = document.getElementById('hitChart').getContext('2d');
+    const grad = hcx.createLinearGradient(0, 0, 0, 300);
+    grad.addColorStop(0, 'rgba(108,167,255,.38)');
+    grad.addColorStop(1, 'rgba(108,167,255,0)');
+    hitChart = chartOrUpdate(hitChart, document.getElementById('hitChart'), {
+      type:'line',
+      data:{ labels:d.hit_series.map(x => new Date(x.ts).toLocaleDateString('tr-TR')), datasets:[{label:'Kümülatif İsabet Oranı (%)', data:d.hit_series.map(x => x.running_hit_rate), borderColor:'#6ca7ff', backgroundColor:grad, borderWidth:2.5, tension:.35, fill:true, pointRadius:0, pointHoverRadius:5, pointHoverBackgroundColor:'#6ca7ff' }]},
+      options:{ responsive:true, interaction:{mode:'index', intersect:false}, plugins:{ legend:{display:false}, tooltip:{callbacks:{label:(c)=>'İsabet: %'+c.parsed.y}} }, scales:{ y:{ beginAtZero:true, max:100, ticks:{callback:(v)=>v+'%'}, grid:{ color:'rgba(255,255,255,.06)' } }, x:{ grid:{ display:false } } } }
+    });
+  } else if (hitChart){ hitChart.destroy(); hitChart = null; }
 
   // Hit *rate* (%), not raw hit *count* — a profile run 40 times isn't
   // "better" than one run 5 times just because it has more hits.
@@ -1413,18 +1543,21 @@ async function loadDashboard(){
   const profileMap = new Map((d.by_profile || []).map(x => [x.profile, rate(x)]));
   const timeframeMap = new Map((d.by_timeframe || []).map(x => [x.timeframe, rate(x)]));
   const labels = [...new Set([...profileMap.keys(), ...timeframeMap.keys()])].filter(Boolean);
-  barChart = chartOrUpdate(barChart, document.getElementById('barChart'), {
-    type:'bar',
-    data:{
-      labels,
-      datasets:[
-        {label:'Profil isabet %', data:labels.map(l => profileMap.has(l) ? profileMap.get(l) : null), backgroundColor:'#31c48d'},
-        {label:'Zaman dilimi isabet %', data:labels.map(l => timeframeMap.has(l) ? timeframeMap.get(l) : null), backgroundColor:'#6ca7ff'},
-      ],
-    },
-    options:{ responsive:true, plugins:{ legend:{ labels:{ color:'#e7eefb' } } },
-      scales:{ y:{ beginAtZero:true, max:100, grid:{ color:'rgba(255,255,255,.06)' } }, x:{ grid:{ display:false } } } }
-  });
+  toggleChartEmpty('barChart', 'barEmpty', labels.length > 0);
+  if (labels.length){
+    barChart = chartOrUpdate(barChart, document.getElementById('barChart'), {
+      type:'bar',
+      data:{
+        labels,
+        datasets:[
+          {label:'Profil isabet %', data:labels.map(l => profileMap.has(l) ? profileMap.get(l) : null), backgroundColor:'#31c48d', borderRadius:6, maxBarThickness:38},
+          {label:'Zaman dilimi isabet %', data:labels.map(l => timeframeMap.has(l) ? timeframeMap.get(l) : null), backgroundColor:'#6ca7ff', borderRadius:6, maxBarThickness:38},
+        ],
+      },
+      options:{ responsive:true, plugins:{ legend:{ labels:{ color:'#e7eefb', usePointStyle:true, boxWidth:8 } }, tooltip:{callbacks:{label:(c)=>c.dataset.label+': %'+c.parsed.y}} },
+        scales:{ y:{ beginAtZero:true, max:100, ticks:{callback:(v)=>v+'%'}, grid:{ color:'rgba(255,255,255,.06)' } }, x:{ grid:{ display:false } } } }
+    });
+  } else if (barChart){ barChart.destroy(); barChart = null; }
 
     document.getElementById('watchlist').innerHTML = d.watchlist.length ? d.watchlist.map(w => `<tr><td><b>${esc(w.symbol)}</b></td><td>${esc(w.name || '')}</td><td>${esc(w.profiles || '')} / ${esc(w.timeframes || '')}</td><td class="muted">${esc(w.sources || '')} <button class="btn alt small" style="margin-left:8px" onclick='editWatchlist(${JSON.stringify(w).replace(/'/g,"&#39;")})'>Seç</button></td></tr>`).join('') : '<tr><td colspan="4" class="empty">Favori listesi boş — bir sembol seçip "Favorilere Ekle" butonuna basın.</td></tr>';
 }
@@ -1432,8 +1565,8 @@ async function loadDashboard(){
 let compareChart = null;
 function renderComparison(results){
   const card = document.getElementById('compareCard');
-  if (!results || results.length < 2){ card.style.display = 'none'; return; }
-  card.style.display = '';
+  if (!results || results.length < 2){ card.classList.add('is-hidden'); return; }
+  card.classList.remove('is-hidden');
   compareChart = chartOrUpdate(compareChart, document.getElementById('compareChartCanvas'), {
     type: 'bar',
     data: {
@@ -1442,9 +1575,10 @@ function renderComparison(results){
         label: 'Final Skor',
         data: results.map(p => p.final_score),
         backgroundColor: results.map(p => p.final_score > 0.15 ? '#31c48d' : (p.final_score < -0.15 ? '#ff6b6b' : '#8ea4c7')),
+        borderRadius: 6, maxBarThickness: 46,
       }],
     },
-    options: { responsive:true, plugins:{legend:{display:false}},
+    options: { responsive:true, plugins:{legend:{display:false}, tooltip:{callbacks:{label:(c)=>'Final skor: '+c.parsed.y.toFixed(2)}}},
       scales:{ y:{min:-1, max:1, grid:{color:'rgba(255,255,255,.06)'}}, x:{grid:{display:false}} } },
   });
   document.getElementById('compareTable').innerHTML = results.map(p => `<tr>
@@ -1561,9 +1695,9 @@ let rsiChart = null;
 let currentDetailIdx = -1;
 
 function highlightResultRow(idx){
-  document.querySelectorAll('#results tr').forEach(tr => tr.classList.remove('selected'));
+  document.querySelectorAll('#results .rcard').forEach(el => el.classList.remove('active'));
   const row = document.getElementById('resrow-' + idx);
-  if (row) row.classList.add('selected');
+  if (row) row.classList.add('active');
 }
 
 async function openDetail(idx, scroll){
@@ -1571,7 +1705,7 @@ async function openDetail(idx, scroll){
   if (!p) return;
   currentDetailIdx = idx;
   const panel = document.getElementById('detailPanel');
-  panel.style.display = 'block';
+  panel.classList.remove('is-hidden');
   highlightResultRow(idx);
 
   // Instant (no-fetch) parts render immediately.
@@ -1767,6 +1901,8 @@ async function initializeForSession(){
     document.getElementById('authCard').style.display = 'none';
     document.getElementById('app_shell').style.display = 'block';
     renderChips();
+    showTab('analiz');
+    loadBrowseExchanges();
     await loadNewsSources();
     await loadUniverses();
     await loadSettings();

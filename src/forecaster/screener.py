@@ -65,6 +65,13 @@ def list_universes() -> list[dict]:
             for key, val in UNIVERSES.items()]
 
 
+def universe_symbols(key: str) -> list[dict]:
+    """The (symbol, name) list for one universe, for browsing in the UI when a
+    user can't recall a ticker."""
+    entries = UNIVERSES.get(key, UNIVERSES["bist"])["symbols"]
+    return [{"symbol": sym, "name": name} for sym, name in entries]
+
+
 def _signal_label(score: float) -> str:
     if score >= 0.5:
         return "Güçlü Al"
