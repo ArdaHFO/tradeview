@@ -36,6 +36,32 @@ def test_locale_for_symbol_defaults_for_unknown_suffix():
     assert fetch._locale_for_symbol("XYZ.ZZ") == fetch._DEFAULT_LOCALE
 
 
+def test_build_news_query_uses_name_not_ticker():
+    # The whole point: query by how outlets write about the company, and OR in
+    # the bare ticker root — never append "stock" (that filtered out coverage).
+    q = fetch.build_news_query("THYAO.IS", "Turk Hava Yollari Anonim Ortakligi")
+    assert q == '"Turk Hava Yollari" OR THYAO'
+    assert "stock" not in q
+
+
+def test_build_news_query_single_word_name_not_quoted():
+    assert fetch.build_news_query("SAP.DE", "SAP SE") == "SAP"
+
+
+def test_build_news_query_falls_back_to_ticker_root_when_name_is_the_symbol():
+    # The detail view passes the symbol in the name slot when it has no company
+    # name; that must not become a ticker-only "THYAO.IS" query.
+    assert fetch.build_news_query("THYAO.IS", "THYAO.IS") == "THYAO"
+    assert fetch.build_news_query("THYAO.IS", "THYAO") == "THYAO"
+    assert fetch.build_news_query("AAPL", None) == "AAPL"
+
+
+def test_build_news_query_short_ambiguous_root_not_ORed():
+    # A 2-letter root like "MC" is too generic to OR in; rely on the name.
+    assert fetch.build_news_query("MC.PA", "LVMH Moet Hennessy Louis Vuitton SE") == \
+        '"LVMH Moet Hennessy Louis Vuitton"'
+
+
 def _entry(title: str, hours_ago: float):
     ts = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
     return SimpleNamespace(get=lambda k, d=None: {

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from .config import Config
 from .models import Prediction
-from .news.fetch import fetch_articles
+from .news.fetch import available_sources, fetch_articles
 from .pipeline import load_watchlist, run_for_symbols
 from .storage.recorder import PredictionRecorder
 from .symbols_search import search_symbols
@@ -171,6 +171,7 @@ def _prediction_to_dict(p: Prediction) -> dict:
     return {
         "ts": p.ts.isoformat(),
         "symbol": p.symbol,
+        "name": p.name,
         "timeframe": p.timeframe,
         "profile": p.profile,
         "news_sources": p.news_sources,
@@ -355,6 +356,12 @@ def create_app(cfg: Config) -> FastAPI:
     @app.get("/api/symbols")
     def api_symbols(q: str = "", _: int = Depends(require_user)) -> JSONResponse:
         return JSONResponse(search_symbols(q))
+
+    @app.get("/api/news-sources")
+    def api_news_sources(user_id: int = Depends(require_user)) -> JSONResponse:
+        """Which news sources exist and whether each is usable right now
+        (keyed sources need their API key configured)."""
+        return JSONResponse(available_sources(_get_runtime(user_id).current_cfg()))
 
     @app.get("/api/news")
     def api_news(symbol: str, name: str = "", sources: str = "google",
@@ -627,8 +634,21 @@ h1 .tag{font-size:13px;font-weight:600;color:var(--muted);vertical-align:middle;
 input[type=text]{width:100%;background:rgba(255,255,255,.04);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:14px 14px;font-size:14px;outline:none}
 input[type=text]:focus{border-color:#35558b;box-shadow:0 0 0 4px rgba(108,167,255,.12)}
 .dropdown{position:absolute;left:0;right:0;top:100%;margin-top:8px;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;z-index:20;max-height:260px;overflow-y:auto}
-.dropdown div{padding:10px 14px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.04)}
-.dropdown div:hover{background:rgba(255,255,255,.04)}
+.dropdown .opt{padding:10px 14px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.04);display:flex;align-items:center;justify-content:space-between;gap:10px}
+.dropdown .opt:hover,.dropdown .opt.active{background:rgba(108,167,255,.16)}
+.dropdown .opt .sym{font-weight:700}
+.dropdown .opt .nm{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;margin-left:4px}
+.dropdown .ex{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:7px;padding:1px 8px;white-space:nowrap}
+.dropdown .msg{padding:12px 14px;color:var(--muted);font-style:italic}
+/* segmented toggle chips (timeframe / news sources) — replaces raw checkboxes */
+.toggle-group{display:flex;flex-wrap:wrap;gap:8px}
+.toggle{position:relative;display:inline-flex;align-items:center;gap:6px;padding:8px 13px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--muted);cursor:pointer;user-select:none;font-size:13px;white-space:nowrap;transition:border-color .15s,background .15s,color .15s}
+.toggle input{position:absolute;opacity:0;width:0;height:0}
+.toggle:hover{border-color:#35558b;color:var(--text)}
+.toggle:has(input:checked){background:rgba(108,167,255,.16);border-color:#4d7fd6;color:var(--text);font-weight:600}
+.toggle:has(input:checked)::before{content:"✓";font-size:11px;color:var(--blue)}
+.toggle:has(input:disabled){opacity:.4;cursor:not-allowed}
+.toggle:has(input:disabled):hover{border-color:var(--line);color:var(--muted)}
 .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}.chips{display:flex;flex-wrap:wrap;gap:8px;min-height:28px}
 .chip{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border-radius:999px;background:rgba(255,255,255,.05);border:1px solid var(--line)}
 .chip button,.btn{border:0;cursor:pointer;border-radius:12px}.chip button{background:transparent;color:var(--muted);padding:0;font-size:14px}
@@ -710,12 +730,12 @@ canvas{width:100%!important;height:320px!important}
       <div class="row" style="margin-top:12px;gap:16px;flex-wrap:wrap">
         <div class="field" style="min-width:220px">
           <label>Zaman dilimi (yeni eklenecek semboller için)</label>
-          <div class="row" id="tf_controls">
-            <label><input type="checkbox" class="tf_cb" value="1d" checked> 1 gün</label>
-            <label><input type="checkbox" class="tf_cb" value="1h"> 1 saat</label>
-            <label><input type="checkbox" class="tf_cb" value="30m"> 30 dk</label>
-            <label><input type="checkbox" class="tf_cb" value="1wk"> 1 hafta</label>
-            <label><input type="checkbox" class="tf_cb" value="1mo"> 1 ay</label>
+          <div class="toggle-group" id="tf_controls">
+            <label class="toggle"><input type="checkbox" class="tf_cb" value="1d" checked> 1 gün</label>
+            <label class="toggle"><input type="checkbox" class="tf_cb" value="1h"> 1 saat</label>
+            <label class="toggle"><input type="checkbox" class="tf_cb" value="30m"> 30 dk</label>
+            <label class="toggle"><input type="checkbox" class="tf_cb" value="1wk"> 1 hafta</label>
+            <label class="toggle"><input type="checkbox" class="tf_cb" value="1mo"> 1 ay</label>
           </div>
         </div>
         <div class="field" style="min-width:180px">
@@ -728,12 +748,9 @@ canvas{width:100%!important;height:320px!important}
             <option value="technical_only">Sadece teknik</option>
           </select>
         </div>
-        <div class="field" style="min-width:160px">
+        <div class="field" style="min-width:240px">
           <label>Haber kaynağı</label>
-          <div class="row" id="src_controls">
-            <label><input type="checkbox" class="src_cb" value="google" checked> Google Haberler</label>
-            <label><input type="checkbox" class="src_cb" value="yahoo"> Yahoo Finans</label>
-          </div>
+          <div class="toggle-group" id="src_controls"><span class="muted" style="font-size:12px">Yükleniyor…</span></div>
         </div>
       </div>
       <div class="row" style="margin-top:12px;justify-content:space-between">
@@ -852,38 +869,77 @@ function formatPrice(sym, value){
 }
 
 const qEl = document.getElementById('q');
+const ddEl = document.getElementById('dd');
 let searchDebounce = null;
 let lastSearchResults = [];
+let activeIdx = -1;
+let searchSeq = 0;          // guards against out-of-order responses
+
+function exchangeBadge(sym){
+  return (sym || '').includes('.') ? sym.split('.').pop().toUpperCase() : 'US';
+}
+function hideDropdown(){ ddEl.style.display = 'none'; activeIdx = -1; }
+function showMessage(html){ ddEl.innerHTML = `<div class="msg">${html}</div>`; ddEl.style.display = 'block'; activeIdx = -1; }
+
+function renderDropdown(){
+  if (!lastSearchResults.length){ showMessage('Sonuç bulunamadı — farklı bir kod ya da şirket adı deneyin.'); return; }
+  ddEl.innerHTML = lastSearchResults.map((it, i) => `
+    <div class="opt${i === activeIdx ? ' active' : ''}" data-idx="${i}">
+      <span class="sym">${esc(it.symbol)}</span>
+      <span class="nm">${esc(it.name)}</span>
+      <span class="ex">${esc(exchangeBadge(it.symbol))}</span>
+    </div>`).join('');
+  ddEl.style.display = 'block';
+}
 
 async function runSearch(){
   const q = qEl.value.trim();
-  const dd = document.getElementById('dd');
-  if (q.length < 2) { dd.style.display = 'none'; lastSearchResults = []; return; }
-  const r = await fetch('/api/symbols?q=' + encodeURIComponent(q));
-  const items = await r.json();
-  lastSearchResults = items;
-  if (!items.length) { dd.style.display = 'none'; return; }
-  dd.innerHTML = items.map(it => `<div onclick='pick(${JSON.stringify(it).replace(/'/g,"&#39;")})'><b>${esc(it.symbol)}</b> — ${esc(it.name)}</div>`).join('');
-  dd.style.display = 'block';
+  if (q.length < 2) { hideDropdown(); lastSearchResults = []; return; }
+  const seq = ++searchSeq;
+  showMessage('Aranıyor…');
+  let items = [];
+  try {
+    const r = await fetch('/api/symbols?q=' + encodeURIComponent(q));
+    items = await r.json();
+  } catch (e) { items = []; }
+  if (seq !== searchSeq) return;   // a newer keystroke already fired
+  lastSearchResults = Array.isArray(items) ? items : [];
+  activeIdx = lastSearchResults.length ? 0 : -1;
+  renderDropdown();
 }
 
 qEl.addEventListener('input', () => {
   clearTimeout(searchDebounce);
-  searchDebounce = setTimeout(runSearch, 300);
+  searchDebounce = setTimeout(runSearch, 250);
 });
 
 qEl.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Enter' && lastSearchResults.length){
+  const open = ddEl.style.display === 'block' && lastSearchResults.length;
+  if (ev.key === 'ArrowDown' && open){
     ev.preventDefault();
-    pick(lastSearchResults[0]);
+    activeIdx = (activeIdx + 1) % lastSearchResults.length;
+    renderDropdown();
+  } else if (ev.key === 'ArrowUp' && open){
+    ev.preventDefault();
+    activeIdx = (activeIdx - 1 + lastSearchResults.length) % lastSearchResults.length;
+    renderDropdown();
+  } else if (ev.key === 'Enter' && open){
+    ev.preventDefault();
+    pick(lastSearchResults[activeIdx >= 0 ? activeIdx : 0]);
   } else if (ev.key === 'Escape'){
-    document.getElementById('dd').style.display = 'none';
+    hideDropdown();
   }
 });
 
+ddEl.addEventListener('click', (ev) => {
+  const opt = ev.target.closest('[data-idx]');
+  if (!opt) return;
+  const item = lastSearchResults[Number(opt.dataset.idx)];
+  if (item) pick(item);
+});
+
 document.addEventListener('click', (ev) => {
-  const dd = document.getElementById('dd');
-  if (ev.target !== qEl && !dd.contains(ev.target)) dd.style.display = 'none';
+  if (ev.target !== qEl && !ddEl.contains(ev.target)) hideDropdown();
 });
 
 function checkedValues(selector){
@@ -892,6 +948,28 @@ function checkedValues(selector){
 function controlTimeframes(){ return checkedValues('.tf_cb').join(',') || '1d'; }
 function controlSources(){ return checkedValues('.src_cb'); }
 function controlProfile(){ return document.getElementById('profile_control').value || 'balanced'; }
+
+const DEFAULT_SOURCES = ['google', 'yahoo'];
+async function loadNewsSources(){
+  const box = document.getElementById('src_controls');
+  let sources = [];
+  try {
+    const r = await fetch('/api/news-sources');
+    if (r.ok) sources = await r.json();
+  } catch (e) { sources = []; }
+  if (!sources.length){
+    // Fall back to the always-keyless sources if the endpoint is unavailable.
+    sources = [{id:'google', label:'Google Haberler', available:true, needs_key:false},
+               {id:'yahoo', label:'Yahoo Finans', available:true, needs_key:false}];
+  }
+  box.innerHTML = sources.map(s => {
+    const checked = s.available && DEFAULT_SOURCES.includes(s.id) ? ' checked' : '';
+    const disabled = s.available ? '' : ' disabled';
+    const hint = s.available ? '' : ' — API anahtarı gerekli';
+    const title = s.needs_key && !s.available ? ' title="Sunucuda API anahtarı ayarlanınca kullanılabilir"' : '';
+    return `<label class="toggle"${title}><input type="checkbox" class="src_cb" value="${esc(s.id)}"${checked}${disabled}> ${esc(s.label)}${hint}</label>`;
+  }).join('');
+}
 
 function pick(item){
   if (!selected.some(s => s.symbol === item.symbol)) {
@@ -903,15 +981,23 @@ function pick(item){
     });
   }
   qEl.value = '';
-  document.getElementById('dd').style.display = 'none';
+  lastSearchResults = [];
+  hideDropdown();
+  qEl.focus();
   renderChips();
 }
 
 function remove(symbol){ selected = selected.filter(s => s.symbol !== symbol); renderChips(); }
 function renderChips(){
-  document.getElementById('chips').innerHTML = selected.map(s =>
-    `<span class="chip" title="${esc(s.timeframe)} / ${esc(s.profile)} / ${esc((s.news_sources||[]).join(','))}">${esc(s.symbol)}
-      <button onclick="remove('${esc(s.symbol)}')">×</button></span>`).join('');
+  const c = document.getElementById('chips');
+  if (!selected.length){
+    c.innerHTML = '<span class="muted" style="font-size:12px">Henüz sembol seçilmedi — yukarıdaki kutudan arayıp ekleyin.</span>';
+    return;
+  }
+  c.innerHTML = selected.map(s =>
+    `<span class="chip" title="${esc(s.name || s.symbol)} · ${esc((s.news_sources||[]).join(', '))}">
+      <span><b>${esc(s.symbol)}</b> <span class="muted" style="font-size:11px">${esc(s.timeframe)} · ${esc(s.profile)}</span></span>
+      <button aria-label="kaldır" onclick="remove('${esc(s.symbol)}')">×</button></span>`).join('');
 }
 
 async function postAnalyze(url, payload){
@@ -1176,7 +1262,7 @@ async function openDetail(idx){
   document.getElementById('detailModal').classList.add('open');
 
   const sources = p.news_sources || 'google';
-  const newsUrl = `/api/news?symbol=${encodeURIComponent(p.symbol)}&name=${encodeURIComponent(p.symbol)}&sources=${encodeURIComponent(sources)}`;
+  const newsUrl = `/api/news?symbol=${encodeURIComponent(p.symbol)}&name=${encodeURIComponent(p.name || p.symbol)}&sources=${encodeURIComponent(sources)}`;
   const chartUrl = `/api/chart?symbol=${encodeURIComponent(p.symbol)}&timeframe=${encodeURIComponent(p.timeframe || '1d')}`;
 
   const [newsResp, chartResp] = await Promise.all([fetch(newsUrl), fetch(chartUrl)]);
@@ -1265,6 +1351,8 @@ async function initializeForSession(){
     document.getElementById('meStatus').textContent = `giriş: ${me.username}`;
     document.getElementById('authCard').style.display = 'none';
     document.getElementById('app_shell').style.display = 'block';
+    renderChips();
+    await loadNewsSources();
     await loadSettings();
     await loadHistory();
     await loadDashboard();

@@ -25,6 +25,10 @@ def _env_int(name: str, default: int) -> int:
 class Config:
     groq_api_key: str = field(
         default_factory=lambda: os.environ.get("GROQ_API_KEY", ""))
+    finnhub_api_key: str = field(
+        default_factory=lambda: os.environ.get("FINNHUB_API_KEY", ""))
+    newsapi_key: str = field(
+        default_factory=lambda: os.environ.get("NEWSAPI_KEY", ""))
     db_path: str = field(
         default_factory=lambda: os.environ.get("DATABASE_URL") or os.environ.get("FORECASTER_DB_PATH", "predictions.db"))
     watchlist_path: str = field(

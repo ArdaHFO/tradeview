@@ -1,11 +1,27 @@
-"""Google News / Yahoo RSS fetch + dedupe for a single symbol, market-aware."""
+"""News fetch + dedupe for a single symbol, market-aware, multi-source.
+
+Sources:
+  * google   – Google News RSS (keyless). Always queried in the local-market
+               locale *and* a global-English pass, so both local and
+               international coverage surfaces.
+  * yahoo    – Yahoo Finance headline RSS (keyless), keyed on the ticker.
+  * finnhub  – Finnhub company-news JSON API (needs FINNHUB_API_KEY).
+  * newsapi  – NewsAPI.org "everything" JSON API (needs NEWSAPI_KEY).
+
+The single most important thing this module does is turn a *ticker* into a
+query that matches how outlets actually write about the company. Searching
+"THYAO.IS" returns almost nothing; "Türk Hava Yolları" (or "Turkish Airlines")
+returns its full coverage. See build_news_query.
+"""
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 from ..config import Config
 from ..models import NewsArticle
@@ -14,8 +30,20 @@ log = logging.getLogger(__name__)
 
 _RSS_URL = "https://news.google.com/rss/search?q={query}&hl={hl}&gl={gl}&ceid={ceid}"
 _YAHOO_RSS_URL = "https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region={gl}&lang={hl}"
+_FINNHUB_URL = "https://finnhub.io/api/v1/company-news"
+_NEWSAPI_URL = "https://newsapi.org/v2/everything"
 
-AVAILABLE_SOURCES = ("google", "yahoo")
+# Order matters: this is also the order sources are queried/merged in.
+AVAILABLE_SOURCES = ("google", "yahoo", "finnhub", "newsapi")
+
+# Human-readable labels + whether the source needs an API key, for the UI.
+SOURCE_LABELS: dict[str, str] = {
+    "google": "Google Haberler",
+    "yahoo": "Yahoo Finans",
+    "finnhub": "Finnhub",
+    "newsapi": "NewsAPI",
+}
+_KEYED_SOURCES = ("finnhub", "newsapi")
 
 # If nothing turns up in the configured lookback window, retry with these
 # progressively wider windows before giving up. Low-newsflow and
@@ -48,7 +76,7 @@ _DEFAULT_LOCALE = ("en-US", "US", "US:en")
 # "ASELSAN Elektronik Sanayi ve Ticaret Anonim Sirketi").
 _CORPORATE_SUFFIX_RE = re.compile(
     r"[,\s]+(?:"
-    r"anonim\s+sirketi|anonim\s+şirketi|anonim\s+ortakligi|anonim\s+ortaklığı|a\.?ş\.?|a\.?o\.?|"
+    r"anonim\s+sirketi|anonim\s+şirketi|anonim\s+ortakligi|anonim\s+ortaklığı|a\.?ş\.?|a\.?s\.?|a\.?o\.?|"
     r"incorporated|inc\.?|corporation|corp\.?|company|co\.?|"
     r"limited|ltd\.?|plc|"
     r"s\.?p\.?a\.?|n\.?v\.?|a\.?g\.?|a\.?b\.?|s\.?a\.?|se"
@@ -65,6 +93,47 @@ def _strip_corporate_suffix(name: str) -> str:
             break
         cleaned = next_cleaned
     return cleaned or name
+
+
+def _ticker_root(symbol: str) -> str:
+    """AAPL -> AAPL, THYAO.IS -> THYAO — the exchange suffix isn't how news
+    outlets refer to the company."""
+    return symbol.split(".", 1)[0].strip() if symbol else ""
+
+
+def _looks_like_ticker(name: str, symbol: str) -> bool:
+    """True when the 'name' handed to us is really just the ticker.
+
+    The detail view passes the symbol itself in the name slot when it has no
+    company name, so "THYAO.IS"/"THYAO" as a name must not be treated as a
+    company name — otherwise we'd build a ticker-only query again.
+    """
+    if not name:
+        return True
+    squashed = re.sub(r"[^a-z0-9]", "", name.lower())
+    return squashed in {
+        re.sub(r"[^a-z0-9]", "", symbol.lower()),
+        _ticker_root(symbol).lower(),
+    }
+
+
+def build_news_query(symbol: str, company_name: str | None) -> str:
+    """Build the news search query for a symbol.
+
+    Prefers the company's real name (how outlets write about it) and OR's in
+    the bare ticker root so ticker-tagged finance pieces still surface. Never
+    appends a language-specific word like "stock" — that silently filtered out
+    almost all non-English coverage (e.g. "Türk Hava Yolları stock" matched a
+    handful of articles where "Türk Hava Yolları" alone matched hundreds).
+    """
+    root = _ticker_root(symbol)
+    name = "" if _looks_like_ticker(company_name or "", symbol) else _strip_corporate_suffix(company_name or "")
+    if not name:
+        return root or symbol
+    phrase = f'"{name}"' if " " in name else name
+    if root and len(root) >= 3 and root.isalpha() and root.lower() != name.lower():
+        return f"{phrase} OR {root}"
+    return phrase
 
 
 def _locale_for_symbol(symbol: str) -> tuple[str, str, str]:
@@ -96,27 +165,44 @@ def _effective_lookback_hours(cfg: Config) -> int:
     return cfg.news_lookback_hours
 
 
+def _consider_article(articles: list[NewsArticle], *, title: str, source_label: str, url: str,
+                      published: datetime | None, snippet: str, cfg: Config,
+                      cutoff: datetime, seen_titles: list[str]) -> bool:
+    """Add one article if it's recent enough and not a near-duplicate.
+
+    Returns True once `articles` has reached max_articles_per_symbol, so callers
+    can stop early. Shared by every source so dedupe/cutoff behave identically.
+    """
+    if published is None or published < cutoff:
+        return False
+    title = (title or "").strip()
+    if not title or _is_duplicate(title, seen_titles, cfg.dedupe_similarity_threshold):
+        return False
+    seen_titles.append(_normalize_title(title))
+    articles.append(NewsArticle(
+        title=title,
+        source=source_label,
+        url=url or "",
+        published_ts=published,
+        snippet=(snippet or "").strip(),
+    ))
+    return len(articles) >= cfg.max_articles_per_symbol
+
+
 def _parse_feed(feed, source_label: str, cfg: Config, cutoff: datetime, seen_titles: list[str]) -> list[NewsArticle]:
     articles: list[NewsArticle] = []
-
     for entry in feed.entries:
-        published = _entry_published(entry)
-        if published is None or published < cutoff:
-            continue
-        title = entry.get("title", "").strip()
-        if not title or _is_duplicate(title, seen_titles, cfg.dedupe_similarity_threshold):
-            continue
-        seen_titles.append(_normalize_title(title))
-        articles.append(NewsArticle(
-            title=title,
-            source=source_label,
+        full = _consider_article(
+            articles,
+            title=entry.get("title", ""),
+            source_label=source_label,
             url=entry.get("link", ""),
-            published_ts=published,
-            snippet=entry.get("summary", "").strip(),
-        ))
-        if len(articles) >= cfg.max_articles_per_symbol:
+            published=_entry_published(entry),
+            snippet=entry.get("summary", ""),
+            cfg=cfg, cutoff=cutoff, seen_titles=seen_titles,
+        )
+        if full:
             break
-
     return articles
 
 
@@ -136,7 +222,7 @@ def _query_google_once(query: str, hl: str, gl: str, ceid: str, cfg: Config,
 def _fetch_google_articles(symbol: str, company_name: str | None, cfg: Config,
                             seen_titles: list[str], lookback_hours: int) -> list[NewsArticle]:
     hl, gl, ceid = _locale_for_symbol(symbol)
-    query = f"{company_name or symbol} stock"
+    query = build_news_query(symbol, company_name)
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
 
     articles = _query_google_once(query, hl, gl, ceid, cfg, cutoff, seen_titles, symbol)
@@ -166,6 +252,89 @@ def _fetch_yahoo_articles(symbol: str, cfg: Config, seen_titles: list[str],
     return _parse_feed(feed, "Yahoo Finance", cfg, cutoff, seen_titles)
 
 
+def _http_get_json(url: str, timeout: float = 8.0) -> object | None:
+    try:
+        req = Request(url, headers={"User-Agent": "trd-news/1.0"})
+        with urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception as exc:
+        log.warning("http json fetch failed for %s: %s", url.split("?", 1)[0], exc)
+        return None
+
+
+def _fetch_finnhub_articles(symbol: str, cfg: Config, seen_titles: list[str],
+                             lookback_hours: int) -> list[NewsArticle]:
+    if not cfg.finnhub_api_key:
+        log.info("finnhub source skipped for %s: FINNHUB_API_KEY not set", symbol)
+        return []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    params = urlencode({
+        "symbol": _ticker_root(symbol),   # Finnhub keys on the bare ticker
+        "from": cutoff.date().isoformat(),
+        "to": datetime.now(timezone.utc).date().isoformat(),
+        "token": cfg.finnhub_api_key,
+    })
+    data = _http_get_json(f"{_FINNHUB_URL}?{params}")
+    if not isinstance(data, list):
+        return []
+    articles: list[NewsArticle] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        ts = item.get("datetime")
+        published = datetime.fromtimestamp(ts, tz=timezone.utc) if isinstance(ts, (int, float)) and ts else None
+        full = _consider_article(
+            articles,
+            title=item.get("headline", ""),
+            source_label=f"Finnhub · {item.get('source', '')}".strip(" ·"),
+            url=item.get("url", ""),
+            published=published,
+            snippet=item.get("summary", ""),
+            cfg=cfg, cutoff=cutoff, seen_titles=seen_titles,
+        )
+        if full:
+            break
+    return articles
+
+
+def _fetch_newsapi_articles(symbol: str, company_name: str | None, cfg: Config,
+                             seen_titles: list[str], lookback_hours: int) -> list[NewsArticle]:
+    if not cfg.newsapi_key:
+        log.info("newsapi source skipped for %s: NEWSAPI_KEY not set", symbol)
+        return []
+    hl, _, _ = _locale_for_symbol(symbol)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+    params = urlencode({
+        "q": build_news_query(symbol, company_name),
+        "language": hl.split("-", 1)[0],   # tr-TR -> tr
+        "sortBy": "publishedAt",
+        "pageSize": min(50, max(10, cfg.max_articles_per_symbol * 2)),
+        "from": cutoff.date().isoformat(),
+        "apiKey": cfg.newsapi_key,
+    })
+    data = _http_get_json(f"{_NEWSAPI_URL}?{params}")
+    if not isinstance(data, dict) or data.get("status") != "ok":
+        return []
+    articles: list[NewsArticle] = []
+    for item in data.get("articles", []):
+        if not isinstance(item, dict):
+            continue
+        published = _parse_iso8601(item.get("publishedAt"))
+        source = item.get("source") or {}
+        full = _consider_article(
+            articles,
+            title=item.get("title", ""),
+            source_label=f"NewsAPI · {source.get('name', '')}".strip(" ·"),
+            url=item.get("url", ""),
+            published=published,
+            snippet=item.get("description", ""),
+            cfg=cfg, cutoff=cutoff, seen_titles=seen_titles,
+        )
+        if full:
+            break
+    return articles
+
+
 def _normalize_sources(sources: list[str] | None) -> list[str]:
     if not sources:
         return ["google"]
@@ -179,16 +348,36 @@ def _normalize_sources(sources: list[str] | None) -> list[str]:
     return normalized or ["google"]
 
 
+def available_sources(cfg: Config) -> list[dict]:
+    """Describe every source for the UI: id, label, and whether it's usable
+    right now (keyed sources are only usable once their API key is set)."""
+    out: list[dict] = []
+    for src in AVAILABLE_SOURCES:
+        needs_key = src in _KEYED_SOURCES
+        if src == "finnhub":
+            available = bool(cfg.finnhub_api_key)
+        elif src == "newsapi":
+            available = bool(cfg.newsapi_key)
+        else:
+            available = True
+        out.append({
+            "id": src,
+            "label": SOURCE_LABELS.get(src, src),
+            "needs_key": needs_key,
+            "available": available,
+        })
+    return out
+
+
 def fetch_articles(symbol: str, company_name: str | None, cfg: Config,
                     sources: list[str] | None = None) -> list[NewsArticle]:
-    """Fetch recent, deduplicated news articles for a symbol from one or more RSS sources.
+    """Fetch recent, deduplicated news articles for a symbol from one or more sources.
 
     Retries with a wider lookback window if the configured one turns up
     nothing — low-newsflow and internationally-listed stocks don't always
     have news in the last 24-72h even when older coverage exists.
     """
     selected_sources = _normalize_sources(sources)
-    clean_name = _strip_corporate_suffix(company_name) if company_name else None
 
     for step in _WIDEN_STEPS_HOURS:
         lookback_hours = _effective_lookback_hours(cfg) if step is None else step
@@ -196,9 +385,13 @@ def fetch_articles(symbol: str, company_name: str | None, cfg: Config,
         articles: list[NewsArticle] = []
         for source in selected_sources:
             if source == "google":
-                articles.extend(_fetch_google_articles(symbol, clean_name, cfg, seen_titles, lookback_hours))
+                articles.extend(_fetch_google_articles(symbol, company_name, cfg, seen_titles, lookback_hours))
             elif source == "yahoo":
                 articles.extend(_fetch_yahoo_articles(symbol, cfg, seen_titles, lookback_hours))
+            elif source == "finnhub":
+                articles.extend(_fetch_finnhub_articles(symbol, cfg, seen_titles, lookback_hours))
+            elif source == "newsapi":
+                articles.extend(_fetch_newsapi_articles(symbol, company_name, cfg, seen_titles, lookback_hours))
 
         if articles:
             articles.sort(key=lambda article: article.published_ts, reverse=True)
@@ -217,3 +410,13 @@ def _entry_published(entry) -> datetime | None:
     if not parsed:
         return None
     return datetime(*parsed[:6], tzinfo=timezone.utc)
+
+
+def _parse_iso8601(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)

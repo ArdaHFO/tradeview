@@ -111,6 +111,7 @@ def run_for_symbols(symbols: list[dict], cfg: Config, progress_cb=None, user_id:
                 timeframe=timeframe,
                 profile=profile,
                 news_sources=news_sources,
+                name=item.get("name") or "",
             )
             recorder.record(prediction, user_id=user_id)
             predictions.append(prediction)

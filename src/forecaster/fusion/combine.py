@@ -27,6 +27,7 @@ def combine(
     timeframe: str = "1d",
     profile: str = "balanced",
     news_sources: str = "google",
+    name: str = "",
 ) -> Prediction:
     news_weight, technical_weight, neutral_band = _profile_weights(cfg, profile)
     final_score = news_weight * news.score + technical_weight * technical.score
@@ -47,6 +48,7 @@ def combine(
     return Prediction(
         ts=datetime.now(timezone.utc),
         symbol=news.symbol,
+        name=name,
         timeframe=timeframe,
         profile=profile,
         news_sources=news_sources,

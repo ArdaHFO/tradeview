@@ -74,6 +74,9 @@ class Prediction:
     final_direction: Direction
     final_confidence: float
     price_at_prediction: float
+    # Company name (best-effort), so the UI can fetch news by name rather than
+    # by ticker. Not persisted — display/query only.
+    name: str = ""
     timeframe: str = "1d"
     profile: str = "balanced"
     news_sources: str = "google"
