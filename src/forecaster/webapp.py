@@ -769,7 +769,8 @@ h1 .tag{font-size:13px;font-weight:600;color:var(--muted);vertical-align:middle;
 .search{position:relative;grid-column:span 12}
 input[type=text]{width:100%;background:rgba(255,255,255,.04);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:14px 14px;font-size:14px;outline:none}
 input[type=text]:focus{border-color:#35558b;box-shadow:0 0 0 4px rgba(108,167,255,.12)}
-.dropdown{position:absolute;left:0;right:0;top:100%;margin-top:8px;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;z-index:20;max-height:260px;overflow-y:auto}
+.search-input-wrap{position:relative}
+.dropdown{position:absolute;left:0;right:0;top:100%;margin-top:8px;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;z-index:200;max-height:260px;overflow-y:auto;box-shadow:0 18px 40px rgba(0,0,0,.4)}
 .dropdown .opt{padding:10px 14px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.04);display:flex;align-items:center;justify-content:space-between;gap:10px}
 .dropdown .opt:hover,.dropdown .opt.active{background:rgba(108,167,255,.16)}
 .dropdown .opt .sym{font-weight:700}
@@ -991,8 +992,10 @@ tbody tr:hover td{background:rgba(255,255,255,.022)}
         <div class="muted">Dünyanın herhangi bir borsasından sembol veya şirket adı ara (ör. AAPL, ASELS, THYAO, SAP, MC), seç ve analiz et.</div>
         <div class="legend"><span><i class="dot" style="background:var(--green)"></i> Yükseliş</span><span><i class="dot" style="background:var(--red)"></i> Düşüş</span><span><i class="dot" style="background:var(--muted)"></i> Nötr</span></div>
       </div>
-      <input type="text" id="q" placeholder="AAPL, ASELS, THYAO, SAP, MC, Apple, Tesla..." autocomplete="off">
-      <div id="dd" class="dropdown" style="display:none"></div>
+      <div class="search-input-wrap">
+        <input type="text" id="q" placeholder="AAPL, ASELS, THYAO, SAP, MC, Apple, Tesla..." autocomplete="off">
+        <div id="dd" class="dropdown" style="display:none"></div>
+      </div>
       <div class="browse">
         <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
           <div class="muted" style="font-size:13px">📋 Adını hatırlamıyor musun? Desteklenen borsalardan göz atıp seç:</div>
@@ -2125,9 +2128,17 @@ function renderDetailChart(){
   if (rsiEl && (cd.rsi || []).some(v => v != null)){
     rsiEl.style.display = '';
     lwRsiChart = LightweightCharts.createChart(rsiEl, lwThemeOpts(rsiEl, 190));
-    const rsiS = lwRsiChart.addLineSeries({color: '#c084fc', lineWidth: 2, priceLineVisible: false});
+    const rsiS = lwRsiChart.addLineSeries({
+      color: '#c084fc', lineWidth: 2, priceLineVisible: false,
+      // Lock the y-axis to the RSI's natural 0-100 range. Without this, the
+      // pane auto-scales to whatever RSI values are in the *visible* window —
+      // if RSI hovers in a narrow band (e.g. 45-55) that zooms the whole pane
+      // in tight, the 30/70 reference lines fall off-screen, and the chart
+      // looks broken/"too zoomed" even though the data is fine.
+      autoscaleInfoProvider: () => ({priceRange: {minValue: 0, maxValue: 100}}),
+    });
     // Pad warm-up bars with whitespace so the RSI shares the price chart's exact
-    // time domain — this is what fixes the "zoomed-in / half missing" bug.
+    // time domain — this is what fixes the "zoomed-in / half missing" x-axis bug.
     rsiS.setData(dates.map((d, i) => cd.rsi[i] != null ? {time: lwTime(d), value: cd.rsi[i]} : {time: lwTime(d)}));
     rsiS.createPriceLine({price: 70, color: 'rgba(255,107,107,.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70'});
     rsiS.createPriceLine({price: 30, color: 'rgba(49,196,141,.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30'});
