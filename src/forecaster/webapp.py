@@ -2130,11 +2130,11 @@ function renderDetailChart(){
     lwRsiChart = LightweightCharts.createChart(rsiEl, lwThemeOpts(rsiEl, 190));
     const rsiS = lwRsiChart.addLineSeries({
       color: '#c084fc', lineWidth: 2, priceLineVisible: false,
-      // Lock the y-axis to the RSI's natural 0-100 range. Without this, the
-      // pane auto-scales to whatever RSI values are in the *visible* window —
-      // if RSI hovers in a narrow band (e.g. 45-55) that zooms the whole pane
-      // in tight, the 30/70 reference lines fall off-screen, and the chart
-      // looks broken/"too zoomed" even though the data is fine.
+      // Lock the y-axis to the RSI's natural 0-100 range via the documented
+      // API. Kept as a first layer, but NOT relied on alone (see anchors below)
+      // — without a fixed range, the pane auto-scales to whatever RSI values
+      // are in the *visible* window, so a narrow band (e.g. 45-55) zooms the
+      // whole pane in tight and the 30/70 reference lines fall off-screen.
       autoscaleInfoProvider: () => ({priceRange: {minValue: 0, maxValue: 100}}),
     });
     // Pad warm-up bars with whitespace so the RSI shares the price chart's exact
@@ -2142,6 +2142,18 @@ function renderDetailChart(){
     rsiS.setData(dates.map((d, i) => cd.rsi[i] != null ? {time: lwTime(d), value: cd.rsi[i]} : {time: lwTime(d)}));
     rsiS.createPriceLine({price: 70, color: 'rgba(255,107,107,.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70'});
     rsiS.createPriceLine({price: 30, color: 'rgba(49,196,141,.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30'});
+    // Belt-and-suspenders: two fully invisible series carrying real data points
+    // pinned at 0 and 100 across the whole timeline. Autoscale in Lightweight
+    // Charts always accounts for every series' actual (visible) data values —
+    // this is the same plain mechanism that already renders the price pane
+    // correctly — so it guarantees the 0-100 frame regardless of whether the
+    // provider API above is fully honored in this chart version.
+    const pin = (value) => {
+      const s = lwRsiChart.addLineSeries({lineVisible: false, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false});
+      s.setData(dates.map(d => ({time: lwTime(d), value})));
+    };
+    pin(0);
+    pin(100);
     setLwView(lwRsiChart, n, show);
   } else if (rsiEl){
     rsiEl.style.display = 'none';
