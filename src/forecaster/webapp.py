@@ -806,7 +806,7 @@ table{width:100%;border-collapse:collapse}th,td{padding:11px 10px;border-bottom:
 canvas{width:100%!important;height:340px!important}
 /* TradingView Lightweight Charts containers */
 .lwc{width:100%;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:rgba(255,255,255,.015)}
-#lwPrice{height:460px}#lwRsi{height:190px;margin-top:6px}
+#lwPrice{height:460px}
 @media (max-width:700px){#lwPrice{height:360px}}
 .row-clickable{cursor:pointer}
 .row-clickable:hover td{background:rgba(255,255,255,.03)}
@@ -1151,9 +1151,6 @@ tbody tr:hover td{background:rgba(255,255,255,.022)}
         <label class="toggle"><input type="checkbox" id="showLevels" onchange="redrawDetailChart()"> Pivot/Fibonacci çizgileri</label>
       </div>
       <div id="lwPrice" class="lwc"></div>
-
-      <div class="section-title">📉 RSI (14) — Momentum <span class="muted" style="font-weight:400;font-size:12px">— 70 üzeri aşırı alım, 30 altı aşırı satım</span></div>
-      <div id="lwRsi" class="lwc"></div>
 
       <div class="section-title" style="margin-top:14px">📐 Önemli Seviyeler <span class="muted" style="font-weight:400;font-size:12px">— pivot (son bar) ve Fibonacci geri çekilme</span></div>
       <div id="detailLevels"></div>
@@ -2037,7 +2034,7 @@ function chartTypeIsCandle(){
 function showLevelsOn(){ const el = document.getElementById('showLevels'); return el && el.checked; }
 
 // TradingView Lightweight Charts — crisp, professional, big.
-let lwChart = null, lwMain = null, lwRsiChart = null;
+let lwChart = null, lwMain = null;
 
 let lastChartTf = '1d';
 function isIntradayTf(tf){ return tf === '30m' || tf === '1h'; }
@@ -2071,13 +2068,12 @@ function setLwView(chart, n, show){
 function renderDetailChart(){
   if (!lastChartData) return;
   const cd = lastChartData, sm = cd.summary || {}, dates = cd.dates || [];
-  const priceEl = document.getElementById('lwPrice'), rsiEl = document.getElementById('lwRsi');
+  const priceEl = document.getElementById('lwPrice');
   if (typeof LightweightCharts === 'undefined' || !priceEl){
     if (priceEl) priceEl.innerHTML = '<div class="chart-empty">Grafik kütüphanesi yüklenemedi.</div>';
     return;
   }
   if (lwChart){ lwChart.remove(); lwChart = null; }
-  if (lwRsiChart){ lwRsiChart.remove(); lwRsiChart = null; }
 
   // --- price pane ---
   lwChart = LightweightCharts.createChart(priceEl, lwThemeOpts(priceEl, 460));
@@ -2123,47 +2119,11 @@ function renderDetailChart(){
   }
   const n = dates.length, show = Math.min(n, 130);
   setLwView(lwChart, n, show);
-
-  // --- RSI pane ---
-  if (rsiEl && (cd.rsi || []).some(v => v != null)){
-    rsiEl.style.display = '';
-    lwRsiChart = LightweightCharts.createChart(rsiEl, lwThemeOpts(rsiEl, 190));
-    const rsiS = lwRsiChart.addLineSeries({
-      color: '#c084fc', lineWidth: 2, priceLineVisible: false,
-      // Lock the y-axis to the RSI's natural 0-100 range via the documented
-      // API. Kept as a first layer, but NOT relied on alone (see anchors below)
-      // — without a fixed range, the pane auto-scales to whatever RSI values
-      // are in the *visible* window, so a narrow band (e.g. 45-55) zooms the
-      // whole pane in tight and the 30/70 reference lines fall off-screen.
-      autoscaleInfoProvider: () => ({priceRange: {minValue: 0, maxValue: 100}}),
-    });
-    // Pad warm-up bars with whitespace so the RSI shares the price chart's exact
-    // time domain — this is what fixes the "zoomed-in / half missing" x-axis bug.
-    rsiS.setData(dates.map((d, i) => cd.rsi[i] != null ? {time: lwTime(d), value: cd.rsi[i]} : {time: lwTime(d)}));
-    rsiS.createPriceLine({price: 70, color: 'rgba(255,107,107,.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '70'});
-    rsiS.createPriceLine({price: 30, color: 'rgba(49,196,141,.55)', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: '30'});
-    // Belt-and-suspenders: two fully invisible series carrying real data points
-    // pinned at 0 and 100 across the whole timeline. Autoscale in Lightweight
-    // Charts always accounts for every series' actual (visible) data values —
-    // this is the same plain mechanism that already renders the price pane
-    // correctly — so it guarantees the 0-100 frame regardless of whether the
-    // provider API above is fully honored in this chart version.
-    const pin = (value) => {
-      const s = lwRsiChart.addLineSeries({lineVisible: false, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false});
-      s.setData(dates.map(d => ({time: lwTime(d), value})));
-    };
-    pin(0);
-    pin(100);
-    setLwView(lwRsiChart, n, show);
-  } else if (rsiEl){
-    rsiEl.style.display = 'none';
-  }
 }
 function redrawDetailChart(){ renderDetailChart(); }
 function resizeLwCharts(){
-  const p = document.getElementById('lwPrice'), r = document.getElementById('lwRsi');
+  const p = document.getElementById('lwPrice');
   if (lwChart && p && p.clientWidth) lwChart.applyOptions({width: p.clientWidth});
-  if (lwRsiChart && r && r.clientWidth) lwRsiChart.applyOptions({width: r.clientWidth});
 }
 window.addEventListener('resize', resizeLwCharts);
 
