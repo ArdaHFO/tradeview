@@ -1854,8 +1854,18 @@ function verdictBanner(p){
   let txt;
   if (p.profile === 'learned'){
     // In learned mode the score IS the model's output: P(up) = (score+1)/2.
-    const pUp = Math.round(((Math.max(-1, Math.min(1, p.final_score)) + 1) / 2) * 100);
-    txt = `🤖 <b>Öğrenen model tahmini (≈3 ay):</b> ${dirLabel(d)} — yükseliş olasılığı <b>%${pUp}</b>.
+    const clamped = Math.max(-1, Math.min(1, p.final_score));
+    const pUp = Math.round(((clamped + 1) / 2) * 100);
+    // Look up this call's conviction band in the model's own out-of-sample
+    // track record, so "how much should I trust THIS call" has a real number.
+    let track = '';
+    const sel = (modelMeta && modelMeta.selective) || [];
+    if (sel.length){
+      const conviction = Math.abs(clamped) / 2;   // |score|/2 == |P-0.5|
+      const band = sel.filter(b => conviction >= b.min_conviction).sort((a, b) => b.min_conviction - a.min_conviction)[0];
+      if (band) track = ` Bu güç seviyesindeki geçmiş çağrılarda (out-of-sample) isabet <b>%${(band.accuracy * 100).toFixed(1)}</b> (kapsam %${(band.coverage * 100).toFixed(1)}).`;
+    }
+    txt = `🤖 <b>Öğrenen model tahmini (≈3 ay):</b> ${dirLabel(d)} — yükseliş olasılığı <b>%${pUp}</b>.${track}
       <span class="muted">Haber/teknik alt-skorları aşağıda; model bunları birlikte öğrendi.</span>`;
   } else {
     const nd = softDir(p.news_score, 0.1);
@@ -2215,9 +2225,11 @@ async function loadModelInfo(){
     return `<div class="wrow"><div class="wl">${esc(n)}</div><div class="wt"><div class="z"></div>${seg}</div><div class="wv" style="color:${val >= 0 ? 'var(--green)' : 'var(--red)'}">${val >= 0 ? '+' : ''}${val.toFixed(3)}</div></div>`;
   }).join('');
   box.innerHTML = strip
+    + selGrid
     + `<div class="muted" style="font-size:12px;margin:14px 0 4px">Öğrenilen sinyal ağırlıkları (yeşil = yükselişe, kırmızı = düşüşe katkı):</div>${bars}`
     + `<div class="muted" style="font-size:12px;margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:rgba(244,185,66,.06)">
         ⚠️ <b>Dürüst not:</b> Bu ≈3 aylık yön için <b>gerçek (out-of-sample)</b> bir sonuçtur ve trend-takip baseline'ını <b>${edge}</b> geçer. Piyasa gürültülü olduğundan hiçbir teknik model %90+ isabet <i>veremez</i> — öyle bir sayı görürseniz o model geleceğe bakıyordur (veri sızıntısı). Daha yükseği için temel analiz + piyasa rejimi verisi gerekir.
+        Seçici moddaki yüksek isabetler (örn. %82) <b>düşük kapsamla</b> gelir (%2-3 gün) — az ama güçlü sinyal, sürekli işlem değildir.
       </div>`;
 }
 
