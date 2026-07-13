@@ -187,6 +187,28 @@ def _pivot_levels(high: float, low: float, close: float) -> dict:
     }
 
 
+def _vwap_series(bars: list) -> list[float | None]:
+    """Session-anchored VWAP: cumulative (typical price x volume) / cumulative
+    volume, resetting at the start of every calendar day. Meaningful mainly on
+    intraday timeframes (30m/1h) — traders use it as the session's "fair value"
+    line. For daily+ bars each bar IS its own session, so it just reduces to
+    that bar's typical price; the UI only offers the VWAP toggle intraday.
+    """
+    out: list[float | None] = []
+    cum_pv = 0.0
+    cum_vol = 0.0
+    last_day = None
+    for b in bars:
+        day = b.ts.date()
+        if day != last_day:
+            cum_pv, cum_vol, last_day = 0.0, 0.0, day
+        typical = (b.high + b.low + b.close) / 3.0
+        cum_pv += typical * b.volume
+        cum_vol += b.volume
+        out.append(round(cum_pv / cum_vol, 4) if cum_vol > 0 else None)
+    return out
+
+
 def _fib_levels(high: float, low: float) -> dict:
     """Fibonacci retracement levels between the period high and low."""
     span = high - low
@@ -505,6 +527,7 @@ def create_app(cfg: Config) -> FastAPI:
             "bb_upper": upper,
             "bb_mid": mid,
             "bb_lower": lower,
+            "vwap": _vwap_series(bars),
             "technical_score": round(verdict.score, 3),
             "technical_indicators": [
                 {
@@ -865,7 +888,15 @@ tr.selected td{background:rgba(108,167,255,.14)!important}
 .levels .lv{background:rgba(255,255,255,.04);border:1px solid var(--line);border-radius:10px;padding:8px 10px;text-align:center}
 .levels .lv .k{font-size:10px;color:var(--muted)}
 .levels .lv .v{font-size:13px;font-weight:700;margin-top:2px}
-.chart-toggle{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.chart-toggle{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+.chart-toolbar{display:flex;gap:16px;flex-wrap:wrap;align-items:center}
+.chart-toolbar .chart-toggle{margin-bottom:8px}
+.toggle[title]{cursor:help}
+.toggle:has(input:disabled){opacity:.4;cursor:not-allowed}
+.chart-wrap{position:relative}
+.chart-legend{position:absolute;top:10px;left:12px;right:12px;z-index:5;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text);background:rgba(8,16,30,.68);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);padding:7px 12px;border-radius:11px;pointer-events:none;border:1px solid rgba(255,255,255,.08)}
+.chart-legend b{font-weight:700}
+.chart-legend .muted{color:var(--muted)}
 /* model weight bars (diverging from center) */
 .wrow{display:flex;align-items:center;gap:10px;margin:7px 0}
 .wrow .wl{width:96px;font-size:12px;color:var(--muted);text-align:right;flex:none}
@@ -1144,13 +1175,39 @@ tbody tr:hover td{background:rgba(255,255,255,.022)}
       <div class="score-badges" id="detailScores"></div>
       <div id="detailPosition" class="pos-wrap"></div>
 
-      <div class="section-title">📈 Fiyat Grafiği <span class="muted" style="font-weight:400;font-size:12px">— hareketli ortalamalar · Bollinger · destek/direnç</span></div>
-      <div class="chart-toggle">
-        <label class="toggle"><input type="radio" name="charttype" value="line" checked onchange="redrawDetailChart()"> Çizgi</label>
-        <label class="toggle"><input type="radio" name="charttype" value="candle" onchange="redrawDetailChart()"> Mum</label>
-        <label class="toggle"><input type="checkbox" id="showLevels" onchange="redrawDetailChart()"> Pivot/Fibonacci çizgileri</label>
+      <div class="section-title">📈 Fiyat Grafiği <span class="muted" style="font-weight:400;font-size:12px">— göstergeleri istediğin gibi aç/kapat</span></div>
+      <div class="chart-toolbar">
+        <div class="chart-toggle">
+          <label class="toggle"><input type="radio" name="charttype" value="line" checked onchange="onChartPrefChange()"> Çizgi</label>
+          <label class="toggle"><input type="radio" name="charttype" value="candle" onchange="onChartPrefChange()"> Mum</label>
+        </div>
+        <div class="chart-toggle">
+          <label class="toggle"><input type="radio" name="pricescale" value="linear" checked onchange="onChartPrefChange()"> Doğrusal</label>
+          <label class="toggle" title="Uzun vadeli/yüksek volatiliteli grafiklerde yüzdesel değişimi doğru gösterir"><input type="radio" name="pricescale" value="log" onchange="onChartPrefChange()"> Logaritmik</label>
+        </div>
+        <div class="chart-toggle" id="chartTfSwitch">
+          <label class="toggle"><input type="radio" name="charttf" value="30m" onchange="switchChartTimeframe('30m')"> 30dk</label>
+          <label class="toggle"><input type="radio" name="charttf" value="1h" onchange="switchChartTimeframe('1h')"> 1s</label>
+          <label class="toggle"><input type="radio" name="charttf" value="1d" checked onchange="switchChartTimeframe('1d')"> 1G</label>
+          <label class="toggle"><input type="radio" name="charttf" value="1wk" onchange="switchChartTimeframe('1wk')"> 1H</label>
+          <label class="toggle"><input type="radio" name="charttf" value="1mo" onchange="switchChartTimeframe('1mo')"> 1A</label>
+        </div>
       </div>
-      <div id="lwPrice" class="lwc"></div>
+      <div class="chart-toggle" id="indicatorToggles">
+        <label class="toggle"><input type="checkbox" data-ind="sma50" checked onchange="onChartPrefChange()"> SMA 50</label>
+        <label class="toggle"><input type="checkbox" data-ind="sma200" checked onchange="onChartPrefChange()"> SMA 200</label>
+        <label class="toggle"><input type="checkbox" data-ind="ema20" checked onchange="onChartPrefChange()"> EMA 20</label>
+        <label class="toggle"><input type="checkbox" data-ind="bb" checked onchange="onChartPrefChange()"> Bollinger</label>
+        <label class="toggle" title="Sadece gün içi (30dk/1s) zaman diliminde anlamlıdır"><input type="checkbox" data-ind="vwap" onchange="onChartPrefChange()"> VWAP</label>
+        <label class="toggle"><input type="checkbox" data-ind="volume" checked onchange="onChartPrefChange()"> Hacim</label>
+        <label class="toggle"><input type="checkbox" data-ind="sr" checked onchange="onChartPrefChange()"> Destek/Direnç</label>
+        <label class="toggle"><input type="checkbox" data-ind="pivot" onchange="onChartPrefChange()"> Pivot</label>
+        <label class="toggle"><input type="checkbox" data-ind="fib" onchange="onChartPrefChange()"> Fibonacci</label>
+      </div>
+      <div class="chart-wrap">
+        <div id="lwPrice" class="lwc"></div>
+        <div id="chartLegend" class="chart-legend"></div>
+      </div>
 
       <div class="section-title" style="margin-top:14px">📐 Önemli Seviyeler <span class="muted" style="font-weight:400;font-size:12px">— pivot (son bar) ve Fibonacci geri çekilme</span></div>
       <div id="detailLevels"></div>
@@ -2018,6 +2075,8 @@ async function showDetailFor(p, scroll){
   lastChartData = chartData;
   lastChartSym = p.symbol;
   lastChartTf = p.timeframe || '1d';
+  const tfEl = document.querySelector(`input[name="charttf"][value="${lastChartTf}"]`);
+  if (tfEl) tfEl.checked = true;
   renderDetailChart();
   renderLevels(p.symbol, sm);
   renderTradePlan(p.symbol, sm);
@@ -2031,13 +2090,58 @@ function chartTypeIsCandle(){
   const el = document.querySelector('input[name="charttype"]:checked');
   return el && el.value === 'candle';
 }
-function showLevelsOn(){ const el = document.getElementById('showLevels'); return el && el.checked; }
+// Individually toggleable overlays (SMA/EMA/Bollinger/VWAP/Volume/S-R/Pivot/Fib).
+function indOn(name){
+  const el = document.querySelector(`#indicatorToggles [data-ind="${name}"]`);
+  return el ? el.checked : false;
+}
+function priceScaleMode(){
+  const el = document.querySelector('input[name="pricescale"]:checked');
+  return (el && el.value === 'log') ? LightweightCharts.PriceScaleMode.Logarithmic : LightweightCharts.PriceScaleMode.Normal;
+}
+
+// Persist chart type / scale / indicator toggles across symbols and reloads —
+// a trader shouldn't have to re-enable their preferred overlays every time.
+const CHART_PREFS_KEY = 'tradeview_chart_prefs_v1';
+function saveChartPrefs(){
+  const prefs = {
+    type: document.querySelector('input[name="charttype"]:checked')?.value || 'line',
+    scale: document.querySelector('input[name="pricescale"]:checked')?.value || 'linear',
+    ind: {},
+  };
+  document.querySelectorAll('#indicatorToggles [data-ind]').forEach(el => { prefs.ind[el.dataset.ind] = el.checked; });
+  try { localStorage.setItem(CHART_PREFS_KEY, JSON.stringify(prefs)); } catch (e) {}
+}
+function loadChartPrefs(){
+  let prefs = null;
+  try { prefs = JSON.parse(localStorage.getItem(CHART_PREFS_KEY) || 'null'); } catch (e) {}
+  if (!prefs) return;
+  const typeEl = document.querySelector(`input[name="charttype"][value="${prefs.type}"]`);
+  if (typeEl) typeEl.checked = true;
+  const scaleEl = document.querySelector(`input[name="pricescale"][value="${prefs.scale}"]`);
+  if (scaleEl) scaleEl.checked = true;
+  document.querySelectorAll('#indicatorToggles [data-ind]').forEach(el => {
+    if (prefs.ind && Object.prototype.hasOwnProperty.call(prefs.ind, el.dataset.ind)) el.checked = prefs.ind[el.dataset.ind];
+  });
+}
+function onChartPrefChange(){ saveChartPrefs(); updateVwapAvailability(); renderDetailChart(); }
+function redrawDetailChart(){ renderDetailChart(); }
 
 // TradingView Lightweight Charts — crisp, professional, big.
 let lwChart = null, lwMain = null;
+let lwTimeIndex = new Map();   // stringified lwTime -> bar index, for the crosshair legend
 
 let lastChartTf = '1d';
 function isIntradayTf(tf){ return tf === '30m' || tf === '1h'; }
+// VWAP only means something within a trading session — grey it out on daily+.
+function updateVwapAvailability(){
+  const el = document.querySelector('#indicatorToggles [data-ind="vwap"]');
+  if (!el) return;
+  const ok = isIntradayTf(lastChartTf);
+  el.disabled = !ok;
+  const label = el.closest('label');
+  if (label) label.title = ok ? '' : 'VWAP sadece gün içi (30 dk / 1 saat) zaman diliminde anlamlıdır.';
+}
 // Daily+ bars use a clean business-day axis; intraday uses timestamps + time.
 function lwTime(iso){
   const d = new Date(iso);
@@ -2055,7 +2159,7 @@ function lwThemeOpts(el, height){
     layout: {background: {type: 'solid', color: 'transparent'}, textColor: '#a9bcda', fontSize: 12, fontFamily: 'Inter,Segoe UI,sans-serif'},
     grid: {vertLines: {color: 'rgba(255,255,255,.05)'}, horzLines: {color: 'rgba(255,255,255,.08)'}},
     crosshair: {mode: LightweightCharts.CrosshairMode.Normal},
-    rightPriceScale: {borderColor: 'rgba(255,255,255,.14)', scaleMargins: {top: 0.08, bottom: 0.08}},
+    rightPriceScale: {borderColor: 'rgba(255,255,255,.14)', scaleMargins: {top: 0.08, bottom: 0.08}, mode: priceScaleMode()},
     timeScale: {borderColor: 'rgba(255,255,255,.14)', timeVisible: isIntradayTf(lastChartTf), secondsVisible: false, rightOffset: 3, minBarSpacing: 3},
   };
 }
@@ -2067,6 +2171,7 @@ function setLwView(chart, n, show){
 
 function renderDetailChart(){
   if (!lastChartData) return;
+  updateVwapAvailability();
   const cd = lastChartData, sm = cd.summary || {}, dates = cd.dates || [];
   const priceEl = document.getElementById('lwPrice');
   if (typeof LightweightCharts === 'undefined' || !priceEl){
@@ -2074,6 +2179,8 @@ function renderDetailChart(){
     return;
   }
   if (lwChart){ lwChart.remove(); lwChart = null; }
+  lwTimeIndex = new Map();
+  dates.forEach((d, i) => lwTimeIndex.set(JSON.stringify(lwTime(d)), i));
 
   // --- price pane ---
   lwChart = LightweightCharts.createChart(priceEl, lwThemeOpts(priceEl, 460));
@@ -2084,46 +2191,90 @@ function renderDetailChart(){
     lwMain = lwChart.addAreaSeries({lineColor: '#6ca7ff', topColor: 'rgba(108,167,255,.35)', bottomColor: 'rgba(108,167,255,0)', lineWidth: 2});
     lwMain.setData(lwLineData(dates, cd.close));
   }
-  const overlay = (arr, color, w) => {
+  const overlay = (arr, color, w, dashed) => {
     if (!arr) return;
-    const s = lwChart.addLineSeries({color, lineWidth: w, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
+    const s = lwChart.addLineSeries({color, lineWidth: w, lineStyle: dashed ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false});
     s.setData(lwLineData(dates, arr));
   };
-  overlay(cd.sma50, '#f4b942', 2);
-  overlay(cd.sma200, '#ff6b6b', 2);
-  overlay(cd.ema20, '#31c48d', 1);
-  overlay(cd.bb_upper, 'rgba(142,164,199,.5)', 1);
-  overlay(cd.bb_lower, 'rgba(142,164,199,.5)', 1);
+  if (indOn('sma50')) overlay(cd.sma50, '#f4b942', 2);
+  if (indOn('sma200')) overlay(cd.sma200, '#ff6b6b', 2);
+  if (indOn('ema20')) overlay(cd.ema20, '#31c48d', 1);
+  if (indOn('bb')){
+    overlay(cd.bb_upper, 'rgba(142,164,199,.5)', 1);
+    overlay(cd.bb_lower, 'rgba(142,164,199,.5)', 1);
+  }
+  if (indOn('vwap') && isIntradayTf(lastChartTf)) overlay(cd.vwap, '#22d3ee', 2, true);
   // volume histogram, tucked into the bottom 18%
-  if (cd.volume){
+  if (indOn('volume') && cd.volume){
     const vol = lwChart.addHistogramSeries({priceScaleId: 'vol', priceFormat: {type: 'volume'}, priceLineVisible: false, lastValueVisible: false});
     lwChart.priceScale('vol').applyOptions({scaleMargins: {top: 0.82, bottom: 0}});
     vol.setData(dates.map((d, i) => ({time: lwTime(d), value: cd.volume[i] || 0, color: cd.close[i] >= cd.open[i] ? 'rgba(49,196,141,.35)' : 'rgba(255,107,107,.35)'})));
   }
-  // level lines (support/resistance always; pivot/fib when toggled)
+  // level lines
   const priceLine = (price, color, title, dashed) => {
     if (price == null || !isFinite(price)) return;
     lwMain.createPriceLine({price, color, lineWidth: 1, lineStyle: dashed ? LightweightCharts.LineStyle.Dashed : LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title});
   };
-  priceLine(sm.support, '#31c48d', 'Destek');
-  priceLine(sm.resistance, '#ff6b6b', 'Direnç');
-  if (showLevelsOn() && sm.pivot){
+  if (indOn('sr')){
+    priceLine(sm.support, '#31c48d', 'Destek');
+    priceLine(sm.resistance, '#ff6b6b', 'Direnç');
+  }
+  if (indOn('pivot') && sm.pivot){
     priceLine(sm.pivot.p, 'rgba(108,167,255,.75)', 'P', true);
     priceLine(sm.pivot.r1, 'rgba(108,167,255,.5)', 'R1', true);
     priceLine(sm.pivot.s1, 'rgba(108,167,255,.5)', 'S1', true);
   }
-  if (showLevelsOn() && sm.fib){
+  if (indOn('fib') && sm.fib){
     priceLine(sm.fib['38.2'], 'rgba(196,132,252,.6)', 'Fib 38', true);
     priceLine(sm.fib['50'], 'rgba(196,132,252,.6)', 'Fib 50', true);
     priceLine(sm.fib['61.8'], 'rgba(196,132,252,.6)', 'Fib 62', true);
   }
   const n = dates.length, show = Math.min(n, 130);
   setLwView(lwChart, n, show);
+
+  // Crosshair legend: OHLC + %change + volume, defaulting to the latest bar.
+  lwChart.subscribeCrosshairMove((param) => {
+    let i = (param && param.time != null) ? lwTimeIndex.get(JSON.stringify(param.time)) : undefined;
+    if (i == null) i = cd.close.length - 1;
+    renderChartLegend(cd, i);
+  });
+  renderChartLegend(cd, cd.close.length - 1);
 }
-function redrawDetailChart(){ renderDetailChart(); }
+function renderChartLegend(cd, i){
+  const box = document.getElementById('chartLegend');
+  if (!box) return;
+  if (i == null || cd.close[i] == null){ box.innerHTML = ''; return; }
+  const sym = lastChartSym, o = cd.open[i], h = cd.high[i], l = cd.low[i], c = cd.close[i];
+  const v = (cd.volume && cd.volume[i] != null) ? cd.volume[i] : null;
+  const prevClose = i > 0 && cd.close[i - 1] != null ? cd.close[i - 1] : c;
+  const chg = prevClose ? ((c / prevClose - 1) * 100) : 0;
+  const col = chg >= 0 ? 'var(--green)' : 'var(--red)';
+  const dateLbl = new Date(cd.dates[i]).toLocaleString('tr-TR', isIntradayTf(lastChartTf)
+    ? {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'} : {day:'2-digit', month:'2-digit', year:'numeric'});
+  box.innerHTML = `<b>${esc(sym || '')}</b><span class="muted">${dateLbl}</span>
+    <span>A <b>${formatPrice(sym, o)}</b></span>
+    <span>Y <b>${formatPrice(sym, h)}</b></span>
+    <span>D <b>${formatPrice(sym, l)}</b></span>
+    <span style="color:${col}">K <b>${formatPrice(sym, c)}</b> (${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%)</span>
+    ${v != null ? `<span class="muted">Hacim ${Math.round(v).toLocaleString('tr-TR')}</span>` : ''}`;
+}
 function resizeLwCharts(){
   const p = document.getElementById('lwPrice');
   if (lwChart && p && p.clientWidth) lwChart.applyOptions({width: p.clientWidth});
+}
+// Flip the chart between timeframes without re-running the (Groq-costing) full
+// analysis — a quick 1D/1W/1M/1h/30m switch is table-stakes for a trader.
+async function switchChartTimeframe(tf){
+  if (!lastChartSym) return;
+  lastChartTf = tf;
+  updateVwapAvailability();
+  const r = await fetch(`/api/chart?symbol=${encodeURIComponent(lastChartSym)}&timeframe=${encodeURIComponent(tf)}`);
+  if (!r.ok) return;
+  const chartData = await r.json();
+  lastChartData = chartData;
+  renderDetailChart();
+  renderLevels(lastChartSym, chartData.summary || {});
+  renderTradePlan(lastChartSym, chartData.summary || {});
 }
 window.addEventListener('resize', resizeLwCharts);
 
@@ -2300,5 +2451,6 @@ async function initializeForSession(){
     await refreshState();
 }
 
+loadChartPrefs();
 initializeForSession();
 </script></body></html>"""
