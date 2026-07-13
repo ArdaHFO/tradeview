@@ -1120,7 +1120,7 @@ tbody tr:hover td{background:rgba(255,255,255,.022)}
       <h3 style="margin:0 0 4px">⚖ Hisse Karşılaştırma</h3>
       <div class="sub" style="margin-bottom:10px">Bu çalıştırmada analiz edilen semboller yan yana.</div>
       <canvas id="compareChartCanvas" style="margin-bottom:14px"></canvas>
-      <table><thead><tr><th>Sembol</th><th>Yön</th><th>Final Skor</th><th>Haber Skoru</th><th>Teknik Skor</th><th>Güven</th></tr></thead>
+      <table><thead><tr><th>Sembol</th><th>Yön</th><th>Final Skor</th><th>Haber Skoru</th><th>Teknik Skor</th><th title="Yön tahmininin doğru olma ihtimali değil — sinyallerin ne kadar güçlü/net konuştuğunu gösterir.">Sinyal Gücü ℹ️</th></tr></thead>
       <tbody id="compareTable"></tbody></table>
     </div>
 
@@ -1182,7 +1182,7 @@ tbody tr:hover td{background:rgba(255,255,255,.022)}
     </div>
     <div class="card panel" data-tab="panom">
       <h3 style="margin:0 0 10px">🏆 Sembol Performansı <span class="muted" style="font-weight:400;font-size:12px">— son 30 gün, sonuçlanmış tahminlere göre</span></h3>
-      <table><thead><tr><th>Sembol</th><th>Tahmin</th><th>İsabet</th><th style="width:45%">Oran</th><th>Ort. Güven</th></tr></thead><tbody id="symperf"><tr><td colspan="5" class="empty">Henüz sonuçlanmış tahmin yok.</td></tr></tbody></table>
+      <table><thead><tr><th>Sembol</th><th>Tahmin</th><th>İsabet</th><th style="width:45%">Oran</th><th title="Yön tahmininin doğru olma ihtimali değil — sinyallerin ortalama gücü.">Ort. Sinyal Gücü ℹ️</th></tr></thead><tbody id="symperf"><tr><td colspan="5" class="empty">Henüz sonuçlanmış tahmin yok.</td></tr></tbody></table>
     </div>
     </div>
 
@@ -1637,7 +1637,7 @@ async function refreshState(){
         <div class="rc-s"><div class="k">Haber</div><div class="v" style="color:${scoreColor(p.news_score)}">${p.news_score >= 0 ? '+' : ''}${p.news_score.toFixed(2)}</div></div>
         <div class="rc-s"><div class="k">Teknik</div><div class="v" style="color:${scoreColor(p.technical_score)}">${p.technical_score >= 0 ? '+' : ''}${p.technical_score.toFixed(2)}</div></div>
       </div>
-      <div class="rc-conf"><div class="muted" style="font-size:11px">Güven %${Math.round(p.final_confidence * 100)}</div><div class="cbar"><i style="width:${Math.round(p.final_confidence * 100)}%"></i></div></div>
+      <div class="rc-conf"><div class="muted" style="font-size:11px" title="Yön tahmininin doğru olma ihtimali değil — sinyal gücü.">${p.profile === 'learned' ? 'Model Güveni' : 'Sinyal Gücü'} %${Math.round(p.final_confidence * 100)} ℹ️</div><div class="cbar"><i style="width:${Math.round(p.final_confidence * 100)}%"></i></div></div>
     </div>`).join('');
     renderComparison(s.results);
     // Auto-open the first result so charts + indicators show without a click.
@@ -1789,12 +1789,13 @@ function renderComparison(results){
     </tr>`).join('');
 }
 
-function scoreBadge(label, score, confidence){
+function scoreBadge(label, score, confidence, confLabel, confTitle){
   const clamped = Math.max(-1, Math.min(1, score));
   const barPct = Math.round(((clamped + 1) / 2) * 100);
   const color = score > 0.15 ? 'var(--green)' : (score < -0.15 ? 'var(--red)' : 'var(--muted)');
+  const titleAttr = confTitle ? ` title="${esc(confTitle)}"` : '';
   const confRow = confidence === undefined || confidence === null ? '' :
-    `<div class="muted" style="font-size:11px">güven ${Math.round(confidence * 100)}%</div>`;
+    `<div class="muted" style="font-size:11px"${titleAttr}>${esc(confLabel || 'güven')} %${Math.round(confidence * 100)}</div>`;
   return `<div class="score-badge">
     <div class="muted" style="font-size:11px">${esc(label)}</div>
     <div class="num" style="color:${color}">${score >= 0 ? '+' : ''}${score.toFixed(2)}</div>
@@ -1871,16 +1872,29 @@ function verdictBanner(p){
     const nd = softDir(p.news_score, 0.1);
     const td = softDir(p.technical_score, 0.1);
     const agree = nd !== 'NEUTRAL' && nd === td;
+    const conflict = nd !== 'NEUTRAL' && td !== 'NEUTRAL' && nd !== td;
     const note = agree ? 'Haber ve teknik taraf aynı yönde — sinyal güçlü.'
-      : (nd === 'NEUTRAL' || td === 'NEUTRAL' ? 'Taraflardan biri nötr — sinyal ılımlı.'
-      : 'Haber ve teknik taraf ayrışıyor — temkinli olun.');
+      : (conflict ? 'Haber ve teknik taraf ayrışıyor — temkinli olun.'
+      : 'Taraflardan biri nötr — sinyal ılımlı.');
     txt = `Haber tarafı <b>${dirLabel(nd)}</b>, teknik taraf <b>${dirLabel(td)}</b>. ${note}`;
+    // The score below is SIGNAL STRENGTH, not "how likely this call is correct" —
+    // spell that out explicitly whenever the final call lands on NEUTRAL, since
+    // that's exactly when a high number next to "NEUTRAL" looks contradictory.
+    if (d === 'NEUTRAL'){
+      txt += conflict
+        ? `<div class="muted" style="font-size:12px;margin-top:6px">ℹ️ Sinyal Gücü yüksek görünse de bu "nötr karar kesin doğru" demek değildir — her iki taraf da güçlü konuşuyor ama <b>zıt yönlerde</b>, birbirini götürüyor. Yön belirsiz demektir.</div>`
+        : `<div class="muted" style="font-size:12px;margin-top:6px">ℹ️ Sinyaller zayıf/belirsiz olduğu için final skor nötr bölgede kaldı.</div>`;
+    }
   }
+  const confLabel = p.profile === 'learned' ? 'Model Güveni (olasılık sapması)' : 'Sinyal Gücü';
+  const confTitle = p.profile === 'learned'
+    ? 'Modelin %50 (yazı-tura) tahmininden ne kadar uzaklaştığı. Yön tahmininin isabet garantisi değildir.'
+    : 'Yön tahmininin doğru olma ihtimali DEĞİLDİR. Haber ve teknik sinyallerin birlikte ne kadar güçlü/net konuştuğunu ölçer.';
   return `<div class="verdict ${dirClass(d)}">
     <div class="big ${dirClass(d)}">${dirArrow(d)} ${dirLabel(d)}</div>
     <div class="txt">${txt}</div>
     <div class="conf">
-      <div class="conf-label">${p.profile === 'learned' ? 'Model güveni (|eğilim|)' : 'Model güveni'}: %${conf}</div>
+      <div class="conf-label" title="${esc(confTitle)}">${confLabel}: %${conf}</div>
       <div class="conf-bar"><i style="width:${conf}%"></i></div>
     </div>
   </div>`;
@@ -1954,8 +1968,13 @@ async function showDetailFor(p, scroll){
     `${p.timeframe} · ${p.profile} · analiz anı fiyatı ${formatPrice(p.symbol, p.price_at_prediction)}`;
   document.getElementById('detailVerdict').innerHTML = verdictBanner(p);
   document.getElementById('detailScores').innerHTML =
-    scoreBadge(p.profile === 'learned' ? '🤖 Model Skoru' : 'Final Skor', p.final_score, p.final_confidence) +
-    scoreBadge('Haber Skoru (AI)', p.news_score, p.news_confidence) +
+    (p.profile === 'learned'
+      ? scoreBadge('🤖 Model Skoru', p.final_score, p.final_confidence, 'model güveni',
+          'Modelin %50 (yazı-tura) tahmininden ne kadar uzaklaştığı — yön tahmininin isabet garantisi değildir.')
+      : scoreBadge('Final Skor', p.final_score, p.final_confidence, 'sinyal gücü',
+          'Bu, yön tahmininin doğru olma ihtimali DEĞİLDİR. Haber ve teknik sinyallerin birlikte ne kadar güçlü/net konuştuğunu gösterir. Sinyaller çelişirse (biri yükseliş biri düşüş derse) final yön nötr olabilir ama bu değer yine de yüksek görünebilir.')) +
+    scoreBadge('Haber Skoru (AI)', p.news_score, p.news_confidence, 'AI güveni',
+      'Yapay zekânın KENDİ haber okumasına ne kadar güvendiği — haberin fiyatı gerçekten hareket ettireceğinin garantisi değildir.') +
     scoreBadge('Teknik Skor', p.technical_score, null);
   document.getElementById('detailTechSummary').innerHTML = techSummaryText(p);
   document.getElementById('detailIndicators').innerHTML = renderIndicatorCards(p.technical_indicators);
