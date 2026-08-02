@@ -94,7 +94,8 @@ def cmd_dashboard(cfg) -> int:
     return 0
 
 
-def cmd_backtest(cfg, day_str: str | None, top_n: int, n_days: int) -> int:
+def cmd_backtest(cfg, day_str: str | None, top_n: int, n_days: int,
+                 save_trades: str | None = None) -> int:
     from datetime import date, timedelta
 
     from scanner.backtest import (Backtester, format_multi_report,
@@ -115,11 +116,48 @@ def cmd_backtest(cfg, day_str: str | None, top_n: int, n_days: int) -> int:
             print()
         print(format_multi_report(reports))
     else:
-        report = bt.run(trading_day, top_n=top_n,
-                        progress=lambda m: print(f"  … {m}"))
+        reports = [bt.run(trading_day, top_n=top_n,
+                          progress=lambda m: print(f"  … {m}"))]
         print()
-        print(format_report(report))
+        print(format_report(reports[0]))
+    if save_trades:
+        from scanner.validation import save_trades as dump, trades_from_reports
+        trades = trades_from_reports(reports)
+        dump(trades, save_trades)
+        print(f"\n{len(trades)} işlem kaydedildi → {save_trades}"
+              f"  (doğrulama: python main.py validate --trades {save_trades})")
     return 0
+
+
+def cmd_validate(cfg, log_path: str | None, trades_path: str | None,
+                 iterations: int, setup_filter: str) -> int:
+    """Bootstrap + Monte Carlo on a finished backtest: is the edge real?"""
+    from scanner.validation import (load_trades, save_trades, trades_from_log,
+                                    validate)
+    if trades_path:
+        trades = load_trades(trades_path)
+        source = trades_path
+    elif log_path:
+        trades = trades_from_log(log_path)
+        source = log_path
+    else:
+        print("hata: --log veya --trades ver (örn. --log backtest_baseline_30d.log)")
+        return 2
+    if setup_filter:
+        keep = {s.strip().upper() for s in setup_filter.split(",")}
+        trades = [t for t in trades if t.setup in keep]
+    if len(trades) < 2:
+        print(f"hata: {source} içinde doğrulanacak yeterli işlem yok "
+              f"({len(trades)} bulundu)")
+        return 1
+    print(f"Kaynak: {source}\n")
+    _, _, vd, report = validate(trades, cfg.risk.equity, iterations=iterations)
+    print(report)
+    if log_path and not trades_path:      # cache the parsed trades for reuse
+        out = log_path.rsplit(".", 1)[0] + "_trades.json"
+        save_trades(trades, out)
+        print(f"\n  (ayrıştırılan işlemler kaydedildi → {out})")
+    return 0 if vd.passed else 1
 
 
 def cmd_today(cfg, top_n: int) -> int:
@@ -157,7 +195,8 @@ def main() -> int:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="US day-trading scanner")
     parser.add_argument("mode", choices=["demo", "screen", "live", "dashboard",
-                                         "backtest", "today", "live-yf"])
+                                         "backtest", "validate", "today",
+                                         "live-yf"])
     parser.add_argument("--date", help="backtest trading day (YYYY-MM-DD)")
     parser.add_argument("--top", type=int, default=10,
                         help="backtest top-N watchlist symbols")
@@ -165,12 +204,24 @@ def main() -> int:
                         help="backtest N trading days ending at --date")
     parser.add_argument("--disable", default="",
                         help="comma-separated setups to turn off (e.g. ORB)")
+    parser.add_argument("--save-trades", metavar="PATH",
+                        help="backtest: write trades to JSON for later validation")
+    parser.add_argument("--log", help="validate: backtest console log to parse")
+    parser.add_argument("--trades", help="validate: trades JSON to load")
+    parser.add_argument("--iterations", type=int, default=10_000,
+                        help="validate: bootstrap / monte carlo resamples")
+    parser.add_argument("--setup", default="",
+                        help="validate: only these setups (comma-separated)")
     args = parser.parse_args()
     cfg = load_config()
     if args.disable:
         cfg.signal.disabled_setups = args.disable
     if args.mode == "backtest":
-        return cmd_backtest(cfg, args.date, args.top, args.days)
+        return cmd_backtest(cfg, args.date, args.top, args.days,
+                            args.save_trades)
+    if args.mode == "validate":
+        return cmd_validate(cfg, args.log, args.trades, args.iterations,
+                            args.setup)
     if args.mode == "today":
         return cmd_today(cfg, args.top)
     if args.mode == "live-yf":
