@@ -1,4 +1,71 @@
-# US Day-Trading Scanner
+# US Trading Scanner — intraday + swing
+
+İki ayrı sistem, tek repo:
+
+| | **Swing** (günlük bar) | **Intraday** (dakikalık bar) |
+|---|---|---|
+| Veri | yfinance — **ücretsiz, anahtarsız**, 10 yıl, 500 sembol | Polygon free tier — 5 istek/dk, tick yok |
+| Örneklem | 5.973 işlem | 152 işlem |
+| Durum | ✅ **`meanrev` doğrulandı** (örneklem dışı dahil) | ⛔ hiçbir setup doğrulanamadı |
+
+**Hızlı başlangıç (swing — çalışan taraf):**
+
+```bash
+pip install -r requirements.txt
+python main.py swing-scan --strategy meanrev   # bugün ne alınır
+python main.py swing --strategy meanrev --years 10 --oos-from 2023-01-01
+```
+
+API anahtarı gerekmez.
+
+---
+
+## Swing sistemi (`src/scanner/swing/`)
+
+Üç **yayınlanmış** strateji, parametreleri bu veriye uydurulmadan olduğu gibi
+uygulandı — intraday setupları backtest iyi görünene kadar elle ayarlanmış ve
+sonra doğrulamayı geçememişti; bu gürültüye uydurmanın klasik imzası.
+
+10 yıl, 503 sembol (S&P 500), 2016-07 → 2026-07:
+
+| Strateji | İşlem | PF [%95 GA] | Getiri | vs SPY (+305%) | Örneklem dışı | Karar |
+|---|---|---|---|---|---|---|
+| **`meanrev`** (Connors RSI-2) | 5.973 | **1.28** [1.19–1.38] | **+499%** | ✅ 3/3 eksende | ✅ PF 1.30 | ✅ **doğrulandı** |
+| `breakout` (Donchian-55) | 870 | 1.27 [1.05–1.51] | +130% | ❌ SPY'ye yeniliyor | ⚠ tutarsız | ⛔ |
+| `trend` (20MA pullback) | 3.103 | 0.83 | −96% | ❌ | — | ⛔ kanıtlanmış zararda |
+
+**`meanrev` örneklem dışı kontrolü** (kesim 2023-01-01) — asıl sınav:
+
+```
+IN-SAMPLE :  3519 işlem | beklenti +0.038 R [+0.023, +0.053] | PF 1.26 ✅
+OUT-SAMPLE:  2454 işlem | beklenti +0.042 R [+0.025, +0.059] | PF 1.30 ✅
+```
+
+Edge, stratejinin seçilmesinde hiç rol oynamamış veride de duruyor.
+
+**SPY al-tut karşılaştırması** — pozitif beklenti "yapmaya değer" demek değildir:
+
+| | meanrev | SPY |
+|---|---|---|
+| Toplam getiri | +499.2% | +304.6% |
+| Max drawdown | **−23.5%** | −33.7% |
+| CAGR | 19.6% | 15.0% |
+| Calmar | **0.83** | 0.44 |
+
+`breakout` istatistiksel olarak anlamlı bir edge'e sahip **ama** SPY'nin yarısı
+kadar getiri veriyor — bu yüzden `benchmark.py` var.
+
+### ⚠ Bilinen kısıt: survivorship bias
+
+Evren **bugünün** S&P 500 listesi. Geçmişe uygulanınca "hangi şirketlerin ayakta
+kalacağını önceden bilmek" varsayımı giriyor. Bu **özellikle `meanrev`'i şişirir**:
+mean reversion düşeni alır, endeksten atılanlar da tam olarak düşüp toparlanamayanlardır.
+Gerçek sonuç raporlanandan **kötüdür**; ne kadar kötü olduğu point-in-time endeks
+verisi olmadan ölçülemiyor (ücretsiz değil). Her raporda uyarı olarak basılıyor.
+
+---
+
+## Intraday sistemi
 
 İki aşamalı huni: **~8000 US hissesi → 10-30 "in play" watchlist → order-flow teyitli sinyaller.**
 
@@ -111,12 +178,19 @@ Edge istatistikseldir: gerçek parayla kullanmadan önce **backtest + 20-30 sean
 paper trading** ile profit factor > 1.3 kanıtlanmalıdır. Her sinyal SQLite'a
 kaydedilir (`signals.db`) — performans analizi bu kayıtlar üzerinden yapılır.
 
-**Şu anki durum: hiçbir setup bu barı geçmiş değil.** Yukarıdaki tabloya bakın —
-iki setup kanıtlanmış şekilde zararda, üçüncüsünün edge'i istatistiksel olarak
-kanıtlanamadı. Bu repo şu an bir **araştırma aracı**, çalışan bir para makinesi
-değil. `validate` komutunun varlık sebebi de bu: iyi görünen bir backtest sayısıyla
-kendini kandırmayı zorlaştırmak.
+**Intraday tarafında hiçbir setup bu barı geçmiş değil** — iki setup kanıtlanmış
+şekilde zararda, üçüncüsünün edge'i kanıtlanamadı. Bilinen en büyük kısıt, backtest
+verisinde gerçek tick bulunmaması ve order flow'un bar şeklinden türetilmesi.
 
-Bilinen en büyük kısıt, backtest verisinde gerçek tick bulunmaması ve order flow'un
-bar şeklinden türetilmesi. Bu kısıt kalkmadan setup'ların adil bir değerlendirmesi
-mümkün değil.
+**Swing tarafında `meanrev` doğrulamayı ve örneklem dışı kontrolü geçti.** Bu
+şunu ifade eder: ölçülen edge şansla açıklanamaz. Şunu **ifade etmez**:
+
+- ❌ "Kazanacağı garanti" — %66 win rate demek her 3 işlemden biri zarar demek.
+  Backtestte 434 stop-out ve %23.5 drawdown var.
+- ❌ "Canlıda aynısı olur" — sonuçlar survivorship bias'lı ve backtest, komisyon/
+  slippage modellenmiş olsa bile gerçek fill değildir.
+- ❌ "%100 başarılı" — böyle bir şey yok. Edge istatistikseldir: yeterince çok
+  işlemde pozitif beklenti, tek tek işlemlerde belirsizlik.
+
+Sıradaki adım backtest değil, **ileriye dönük test**: 20-30 seans paper trading.
+Geçmişe bakan hiçbir sayı bunun yerini tutmaz.

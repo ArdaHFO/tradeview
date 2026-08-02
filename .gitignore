@@ -14,3 +14,4 @@ watchlist_cache.json
 # yfinance daily-bar cache: large, regenerable
 .cache/
 swing_*.log
+swing_trades*.json

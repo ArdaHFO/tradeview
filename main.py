@@ -235,6 +235,30 @@ def cmd_swing(cfg, strategy_name: str, years: float, universe_name: str,
     return 0 if failures == 0 else 1
 
 
+def cmd_swing_scan(cfg, strategy_name: str, universe_name: str,
+                   max_positions: int) -> int:
+    """Today's swing entries from the latest closed daily bar."""
+    from scanner.swing.backtest import SwingConfig
+    from scanner.swing.data import load_daily, universe
+    from scanner.swing.scan import format_scan, scan_today
+    from scanner.swing.strategies import build
+
+    if strategy_name == "all":
+        strategy_name = "meanrev"          # the only one that cleared validation
+    say = lambda m: print(f"  … {m}")                       # noqa: E731
+    symbols = universe(universe_name)
+    print(f"Evren: {universe_name} — {len(symbols)} sembol\n")
+    # Two years is plenty of warmup for a 200-day mean and keeps the pull light.
+    frames = load_daily(symbols, years=2, progress=say)
+    cfg_swing = SwingConfig(equity=cfg.risk.equity, max_positions=max_positions)
+    print()
+    for name in [s.strip() for s in strategy_name.split(",")]:
+        cands, bar_date = scan_today(frames, build(name), cfg_swing)
+        print(format_scan(cands, bar_date, name, cfg_swing))
+        print()
+    return 0
+
+
 def cmd_alpaca_check(cfg) -> int:
     """Report what this Alpaca key can actually read — iex only, or full SIP."""
     from scanner.data.alpaca import AlpacaData, AlpacaError
@@ -299,7 +323,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="US day-trading scanner")
     parser.add_argument("mode", choices=["demo", "screen", "live", "dashboard",
                                          "backtest", "validate", "today",
-                                         "live-yf", "alpaca-check", "swing"])
+                                         "live-yf", "alpaca-check", "swing",
+                                         "swing-scan"])
     parser.add_argument("--date", help="backtest trading day (YYYY-MM-DD)")
     parser.add_argument("--top", type=int, default=10,
                         help="backtest top-N watchlist symbols")
@@ -340,6 +365,9 @@ def main() -> int:
         return cmd_swing(cfg, args.strategy, args.years, args.universe,
                          args.max_positions, args.save_trades, args.iterations,
                          args.oos_from)
+    if args.mode == "swing-scan":
+        return cmd_swing_scan(cfg, args.strategy, args.universe,
+                              args.max_positions)
     if args.mode == "alpaca-check":
         return cmd_alpaca_check(cfg)
     if args.mode == "today":
