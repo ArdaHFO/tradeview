@@ -198,9 +198,86 @@ def _iv(interval) -> dict:
     return {"point": interval.point, "lo": interval.lo, "hi": interval.hi}
 
 
+class SwingState:
+    """Today's swing candidates, scanned in the background and cached.
+
+    Kept separate from the intraday scan because it is the half of the repo that
+    actually cleared validation -- it must not be blocked by, or fail with, the
+    throttled Polygon watchlist scan.
+    """
+
+    def __init__(self, cfg: Config, strategy: str = "meanrev") -> None:
+        self.cfg = cfg
+        self.strategy = strategy
+        self.lock = threading.Lock()
+        self.status = "idle"
+        self.progress = ""
+        self.error: str | None = None
+        self.bar_date: str | None = None
+        self.scanned_at: str | None = None
+        self.candidates: list[dict] = []
+
+    def start(self) -> bool:
+        with self.lock:
+            if self.status == "scanning":
+                return False
+            self.status = "scanning"
+            self.error = None
+        threading.Thread(target=self._scan, daemon=True).start()
+        return True
+
+    def _scan(self) -> None:
+        try:
+            from .swing.backtest import SwingConfig
+            from .swing.data import load_daily, universe
+            from .swing.scan import scan_today
+            from .swing.strategies import build
+
+            def note(msg: str) -> None:
+                with self.lock:
+                    self.progress = msg
+
+            symbols = universe("sp500")
+            note(f"{len(symbols)} sembol için günlük bar yükleniyor")
+            frames = load_daily(symbols, years=2, progress=note)
+            note("sinyaller taranıyor")
+            scfg = SwingConfig(equity=self.cfg.risk.equity)
+            cands, bar_date = scan_today(frames, build(self.strategy), scfg)
+            rows = [{
+                "symbol": c.symbol,
+                "close": round(c.close, 2),
+                "stop": round(c.stop, 2),
+                "shares": c.shares,
+                "notional": round(c.notional, 0),
+                "risk": round(c.shares * c.risk_per_share, 0),
+                "reason": c.reason,
+            } for c in cands]
+            with self.lock:
+                self.candidates = rows
+                self.bar_date = str(bar_date.date()) if bar_date is not None else None
+                self.scanned_at = datetime.now(timezone.utc).isoformat()
+                self.status = "ready"
+                self.progress = ""
+        except Exception as exc:
+            log.exception("swing scan failed")
+            with self.lock:
+                self.status = "error"
+                self.error = str(exc)
+
+    def payload(self) -> dict:
+        with self.lock:
+            return {"status": self.status, "progress": self.progress,
+                    "error": self.error, "strategy": self.strategy,
+                    "bar_date": self.bar_date, "scanned_at": self.scanned_at,
+                    "equity": self.cfg.risk.equity,
+                    "candidates": list(self.candidates)}
+
+
 def create_app(cfg: Config) -> FastAPI:
-    app = FastAPI(title="US Day-Trading Scanner")
+    app = FastAPI(title="US Trading Scanner")
     state = DashboardState(cfg)
+    swing = SwingState(cfg)
+    swing.start()                               # the validated half: load it first
     if not state.watchlist:                     # first launch: scan immediately
         state.start_scan()
 
@@ -226,6 +303,16 @@ def create_app(cfg: Config) -> FastAPI:
     @app.get("/api/validation")
     def api_validation() -> JSONResponse:
         return JSONResponse(state.validation())
+
+    @app.get("/api/swing")
+    def api_swing() -> JSONResponse:
+        if swing.status == "idle":
+            swing.start()
+        return JSONResponse(swing.payload())
+
+    @app.post("/api/swing/rescan")
+    def api_swing_rescan() -> JSONResponse:
+        return JSONResponse({"started": swing.start()})
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -282,8 +369,24 @@ PAGE = """<!doctype html>
  .cibar b { position:absolute; width:2px; height:12px; top:-3px; background:#e6edf3; }
  .cibar u { position:absolute; width:1px; height:12px; top:-3px; background:#8b949e; }
 </style></head><body>
-<h1>US Day-Trading Scanner <span id="mode" class="badge warn"></span>
-    <span id="status" class="badge ok"></span></h1>
+<h1>US Trading Scanner</h1>
+
+<section id="swingsec" style="margin-top:6px;border-top:0;padding-top:0">
+ <h3>📈 Swing Sinyalleri <span id="swbadge" class="badge ok"></span>
+  <small style="color:#8b949e;font-weight:400" id="swsub"></small>
+  <button style="margin-left:10px;padding:4px 12px;font-size:12px"
+          id="swrescan" onclick="swingRescan()">Yenile</button></h3>
+ <div style="color:#8b949e;font-size:12px;margin-bottom:4px">
+  Doğrulanmış strateji (Connors RSI-2) · 5.973 işlem · PF 1.28 · örneklem dışı ✅
+  · günlük bar, ücretsiz veri</div>
+ <div id="swbody"><div class="empty">yükleniyor…</div></div>
+</section>
+
+<h3 style="margin-top:30px;border-top:1px solid #21262d;padding-top:18px">
+  ⏱️ Intraday <span id="mode" class="badge warn"></span>
+  <span id="status" class="badge ok"></span></h3>
+<div class="sub" style="color:#f85149">⛔ Hiçbir intraday setup doğrulamayı geçemedi
+ — aşağısı referans amaçlıdır, işlem sinyali değildir.</div>
 <div class="sub">Veri günü: <b id="asof">—</b> · Son tarama: <span id="scanned">—</span>
  · <button id="rescan" onclick="rescan()">Yeniden Tara</button></div>
 <div class="grid">
@@ -435,6 +538,46 @@ async function refreshVal(){
     ${equitySvg(v.equity)}`;
 }
 
+// --- swing signals -------------------------------------------------------
+async function swingRescan(){ await fetch('/api/swing/rescan',{method:'POST'}); refreshSwing(); }
+
+async function refreshSwing(){
+  const s = await (await fetch('/api/swing')).json();
+  const badge = document.getElementById('swbadge');
+  badge.textContent = s.status + (s.progress ? ' · ' + s.progress : '');
+  badge.className = 'badge ' + (s.status==='error' ? 'err'
+                    : (s.status==='ready' ? 'ok' : 'warn'));
+  document.getElementById('swrescan').disabled = (s.status === 'scanning');
+  document.getElementById('swsub').textContent = s.bar_date
+      ? `— son kapanış barı ${s.bar_date} · sermaye $${s.equity.toLocaleString()}` : '';
+  const body = document.getElementById('swbody');
+  if (s.status === 'error'){
+    body.innerHTML = `<div class="empty">hata: ${s.error}</div>`; return;
+  }
+  if (s.status === 'scanning' && !s.candidates.length){
+    body.innerHTML = '<div class="empty">günlük barlar yükleniyor…</div>'; return;
+  }
+  if (!s.candidates.length){
+    body.innerHTML = '<div class="empty">bugün sinyal yok — sabırlı ol, '
+                   + 'sinyal yokken işlem yapmamak da stratejinin parçası</div>';
+    return;
+  }
+  body.innerHTML = `<table><thead><tr><th>#</th><th>Sembol</th><th>Kapanış</th>
+    <th>Stop</th><th>Adet</th><th>Tutar</th><th>Risk</th><th>Gerekçe</th></tr></thead>
+    <tbody>${s.candidates.map((c,i)=>`<tr>
+      <td>${i+1}</td><td><b class="long">${c.symbol}</b></td>
+      <td>$${c.close.toFixed(2)}</td><td class="neg">$${c.stop.toFixed(2)}</td>
+      <td>${c.shares}</td><td>$${c.notional.toLocaleString()}</td>
+      <td>$${c.risk.toLocaleString()}</td>
+      <td style="color:#8b949e">${c.reason}</td></tr>`).join('')}</tbody></table>
+    <div style="color:#e3b341;font-size:12px;margin-top:10px">
+     ⚠ Giriş <b>bir sonraki seansın açılışında</b> yapılır — backtest böyle doldurdu.
+     Gün içi fiyattan girmek test edilmemiş bir strateji olur.<br>
+     ⚠ Adet son kapanışa göre tahmindir; gerçek fill açılış fiyatıdır.
+     %66 kazanma oranı = her 3 işlemden biri zarar.</div>`;
+}
+
 refresh(); setInterval(refresh, 5000);
 refreshVal(); setInterval(refreshVal, 15000);
+refreshSwing(); setInterval(refreshSwing, 8000);
 </script></body></html>"""
