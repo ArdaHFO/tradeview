@@ -160,6 +160,81 @@ def cmd_validate(cfg, log_path: str | None, trades_path: str | None,
     return 0 if vd.passed else 1
 
 
+def cmd_swing(cfg, strategy_name: str, years: float, universe_name: str,
+              max_positions: int, save_trades: str | None,
+              iterations: int, oos_from: str = "") -> int:
+    """Daily-bar swing backtest + the same statistical validation as intraday."""
+    from scanner.swing import backtest as swing_bt
+    from scanner.swing.data import load_daily, universe
+    from scanner.swing.strategies import REGISTRY, build
+    from scanner.validation import save_trades as dump, validate
+
+    if strategy_name == "all":
+        names = sorted(REGISTRY)
+    else:
+        names = [s.strip() for s in strategy_name.split(",")]
+    say = lambda m: print(f"  … {m}")                       # noqa: E731
+
+    symbols = universe(universe_name)
+    print(f"Evren: {universe_name} — {len(symbols)} sembol, {years:g} yıl\n")
+    frames = load_daily(symbols, years=years, progress=say)
+
+    cfg_swing = swing_bt.SwingConfig(equity=cfg.risk.equity,
+                                     max_positions=max_positions)
+    failures = 0
+    for name in names:
+        try:
+            strat = build(name)
+        except KeyError as exc:
+            print(f"hata: {exc}")
+            return 2
+        print()
+        rep = swing_bt.run(frames, strat, cfg_swing, progress=say)
+        print()
+        print(swing_bt.format_report(rep, cfg_swing))
+        if len(rep.trades) < 2:
+            print("  (doğrulama için yeterli işlem yok)")
+            failures += 1
+            continue
+        print()
+        _, _, vd, text = validate(rep.trades, cfg_swing.equity,
+                                  iterations=iterations)
+        print(text)
+        if oos_from:
+            # Split by date and validate each half. The strategies here use
+            # published parameters rather than ones fitted to this sample, so
+            # this is checking selection bias (three candidates were tried and
+            # the best kept), not classic parameter overfitting.
+            ins = [t for t in rep.trades if t.day < oos_from]
+            oos = [t for t in rep.trades if t.day >= oos_from]
+            print(f"\n  ═══ ÖRNEKLEM DIŞI KONTROL (kesim {oos_from}) ═══")
+            for label, subset in (("IN-SAMPLE ", ins), ("OUT-SAMPLE", oos)):
+                if len(subset) < 2:
+                    print(f"  {label}: yetersiz işlem ({len(subset)})")
+                    continue
+                b, _, v2, _ = validate(subset, cfg_swing.equity,
+                                       iterations=iterations)
+                mark = "✅" if v2.passed else "⛔"
+                print(f"  {label}: {len(subset):5d} işlem | "
+                      f"beklenti {b.expectancy_r.point:+.3f} R "
+                      f"[{b.expectancy_r.lo:+.3f}, {b.expectancy_r.hi:+.3f}] | "
+                      f"PF {b.profit_factor.point:.2f} {mark}")
+            if len(oos) >= 2:
+                _, _, v_oos, _ = validate(oos, cfg_swing.equity,
+                                          iterations=iterations)
+                if not v_oos.passed:
+                    print("  ⛔ Örneklem dışında edge kayboluyor — in-sample "
+                          "sonuç seçim yanlılığı olabilir.")
+                    failures += 1
+        if save_trades:
+            path = (save_trades if len(names) == 1
+                    else save_trades.rsplit(".", 1)[0] + f"_{name}.json")
+            dump(rep.trades, path)
+            print(f"\n  işlemler kaydedildi → {path}")
+        failures += 0 if vd.passed else 1
+    return 0 if failures == 0 else 1
+
+
 def cmd_alpaca_check(cfg) -> int:
     """Report what this Alpaca key can actually read — iex only, or full SIP."""
     from scanner.data.alpaca import AlpacaData, AlpacaError
@@ -224,7 +299,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="US day-trading scanner")
     parser.add_argument("mode", choices=["demo", "screen", "live", "dashboard",
                                          "backtest", "validate", "today",
-                                         "live-yf", "alpaca-check"])
+                                         "live-yf", "alpaca-check", "swing"])
     parser.add_argument("--date", help="backtest trading day (YYYY-MM-DD)")
     parser.add_argument("--top", type=int, default=10,
                         help="backtest top-N watchlist symbols")
@@ -240,6 +315,17 @@ def main() -> int:
                         help="validate: bootstrap / monte carlo resamples")
     parser.add_argument("--setup", default="",
                         help="validate: only these setups (comma-separated)")
+    parser.add_argument("--strategy", default="all",
+                        help="swing: meanrev | breakout | trend | all")
+    parser.add_argument("--years", type=float, default=10.0,
+                        help="swing: years of daily history")
+    parser.add_argument("--universe", default="sp500",
+                        help="swing: sp500 | fallback")
+    parser.add_argument("--max-positions", type=int, default=10,
+                        help="swing: concurrent position slots")
+    parser.add_argument("--oos-from", default="",
+                        help="swing: split date (YYYY-MM-DD) for an "
+                             "out-of-sample check")
     args = parser.parse_args()
     cfg = load_config()
     if args.disable:
@@ -250,6 +336,10 @@ def main() -> int:
     if args.mode == "validate":
         return cmd_validate(cfg, args.log, args.trades, args.iterations,
                             args.setup)
+    if args.mode == "swing":
+        return cmd_swing(cfg, args.strategy, args.years, args.universe,
+                         args.max_positions, args.save_trades, args.iterations,
+                         args.oos_from)
     if args.mode == "alpaca-check":
         return cmd_alpaca_check(cfg)
     if args.mode == "today":
