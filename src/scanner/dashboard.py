@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -141,7 +142,8 @@ class DashboardState:
         Cached on the trades file's mtime: the resampling costs ~1s and the
         page polls every few seconds.
         """
-        files = sorted(Path(".").glob("*_trades.json"),
+        # Matches both `<run>_trades.json` (intraday) and `swing_trades_<strategy>.json`
+        files = sorted(Path(".").glob("*trades*.json"),
                        key=lambda p: p.stat().st_mtime, reverse=True)
         if not files:
             return {"available": False,
@@ -178,7 +180,7 @@ class DashboardState:
             "expectancy": _iv(boot.expectancy_r),
             "profit_factor": _iv(boot.profit_factor),
             "win_rate": _iv(boot.win_rate),
-            "p_no_edge": boot.p_no_edge,
+            "p_no_edge": _num(boot.p_no_edge),
             "trades_needed": boot.trades_needed,
             "total_pnl": mc.realized_pnl,
             "max_dd": mc.realized_max_dd,
@@ -194,8 +196,15 @@ class DashboardState:
         }
 
 
+def _num(value: float) -> float | None:
+    """JSON has no inf/nan. Profit factor is infinite when a sample contains no
+    losing trades, which would otherwise 500 the endpoint."""
+    return value if math.isfinite(value) else None
+
+
 def _iv(interval) -> dict:
-    return {"point": interval.point, "lo": interval.lo, "hi": interval.hi}
+    return {"point": _num(interval.point), "lo": _num(interval.lo),
+            "hi": _num(interval.hi)}
 
 
 class SwingState:
@@ -448,11 +457,15 @@ async function refresh(){
 async function rescan(){ await fetch('/api/rescan',{method:'POST'}); refresh(); }
 
 // --- backtest validation -------------------------------------------------
-const pct = v => (v*100).toFixed(1) + '%';
+// Non-finite stats arrive as null (profit factor is infinite when a sample has
+// no losing trades), so every formatter has to tolerate it.
+const pct = v => v == null ? '—' : (v*100).toFixed(1) + '%';
+const fix = (v, n) => v == null ? '∞' : v.toFixed(n);
 
 // Confidence-interval bar: grey track = full span drawn, blue = the interval,
 // white tick = point estimate, grey tick = the reference value (0 or 1).
 function ciBar(lo, hi, point, ref){
+  if (lo == null || hi == null || point == null) return '';
   const min = Math.min(lo, ref, point), max = Math.max(hi, ref, point);
   const span = (max - min) || 1;
   const x = v => ((v - min) / span * 100).toFixed(1);
@@ -500,13 +513,13 @@ async function refreshVal(){
     <div class="cards">
       <div class="card"><div class="lbl">Beklenti (R/işlem)</div>
         <div class="val" style="color:${e.lo>0?'#3fb950':'#e3b341'}">
-          ${e.point>=0?'+':''}${e.point.toFixed(3)}</div>
-        <div class="ci">%95 GA ${e.lo.toFixed(3)} … ${e.hi.toFixed(3)}</div>
+          ${e.point>=0?'+':''}${fix(e.point,3)}</div>
+        <div class="ci">%95 GA ${fix(e.lo,3)} … ${fix(e.hi,3)}</div>
         ${ciBar(e.lo, e.hi, e.point, 0)}</div>
       <div class="card"><div class="lbl">Profit factor</div>
         <div class="val" style="color:${pf.lo>1?'#3fb950':'#e3b341'}">
-          ${pf.point.toFixed(2)}</div>
-        <div class="ci">%95 GA ${pf.lo.toFixed(2)} … ${pf.hi.toFixed(2)}</div>
+          ${fix(pf.point,2)}</div>
+        <div class="ci">%95 GA ${fix(pf.lo,2)} … ${fix(pf.hi,2)}</div>
         ${ciBar(pf.lo, pf.hi, pf.point, 1)}</div>
       <div class="card"><div class="lbl">Win rate</div>
         <div class="val">${pct(wr.point)}</div>
@@ -515,12 +528,12 @@ async function refreshVal(){
       <div class="card"><div class="lbl">Toplam PnL</div>
         <div class="val ${v.total_pnl>=0?'pos':'neg'}">
           ${v.total_pnl>=0?'+':''}$${Math.abs(v.total_pnl).toFixed(2)}</div>
-        <div class="ci">koşu sonu GA $${v.final_pnl_ci.lo.toFixed(0)} …
-          $${v.final_pnl_ci.hi.toFixed(0)}</div></div>
+        <div class="ci">koşu sonu GA $${fix(v.final_pnl_ci.lo,0)} …
+          $${fix(v.final_pnl_ci.hi,0)}</div></div>
       <div class="card"><div class="lbl">Max drawdown</div>
         <div class="val neg">$${v.max_dd.toFixed(2)}</div>
-        <div class="ci">%95 GA $${v.max_dd_ci.lo.toFixed(0)} …
-          $${v.max_dd_ci.hi.toFixed(0)}</div></div>
+        <div class="ci">%95 GA $${fix(v.max_dd_ci.lo,0)} …
+          $${fix(v.max_dd_ci.hi,0)}</div></div>
       <div class="card"><div class="lbl">Zararla bitme riski</div>
         <div class="val" style="color:${v.p_losing_run>0.05?'#f85149':'#3fb950'}">
           ${pct(v.p_losing_run)}</div>

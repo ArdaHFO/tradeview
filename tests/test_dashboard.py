@@ -67,6 +67,16 @@ def test_validation_flags_a_coin_flip_as_unproven(tmp_path, client_in):
     assert body["notes"]
 
 
+def test_validation_finds_swing_named_trade_files(tmp_path, client_in):
+    """Swing writes `swing_trades_<strategy>.json`, which a `*_trades.json`
+    glob silently misses -- the validated half would never reach the panel."""
+    _write_trades(tmp_path / "swing_trades_meanrev.json",
+                  [_row(1.0, 50.0) for _ in range(10)])
+    body = client_in().get("/api/validation").json()
+    assert body["available"] is True
+    assert body["source"] == "swing_trades_meanrev.json"
+
+
 def test_validation_picks_the_newest_trades_file(tmp_path, client_in):
     old = tmp_path / "old_trades.json"
     new = tmp_path / "new_trades.json"
