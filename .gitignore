@@ -4,3 +4,9 @@ __pycache__/
 *.db
 .pytest_cache/
 .venv/
+
+# Backtest artefacts: reproducible from `python main.py backtest`, and the logs
+# run to megabytes. Findings worth keeping go in commit messages and README.
+backtest_*.log
+*_trades.json
+watchlist_cache.json

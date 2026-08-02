@@ -160,6 +160,34 @@ def cmd_validate(cfg, log_path: str | None, trades_path: str | None,
     return 0 if vd.passed else 1
 
 
+def cmd_alpaca_check(cfg) -> int:
+    """Report what this Alpaca key can actually read — iex only, or full SIP."""
+    from scanner.data.alpaca import AlpacaData, AlpacaError
+    if not cfg.alpaca_key_id or not cfg.alpaca_secret_key:
+        print("ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY tanımlı değil.\n"
+              "alpaca.markets üzerinden ücretsiz hesap açıp .env dosyasına ekle:\n"
+              "  ALPACA_API_KEY_ID=...\n  ALPACA_API_SECRET_KEY=...")
+        return 2
+    try:
+        api = AlpacaData(cfg.alpaca_key_id, cfg.alpaca_secret_key)
+    except AlpacaError as exc:
+        print(f"hata: {exc}")
+        return 2
+    print("Alpaca geçmiş veri yetkisi (tick verisi kritik — CVD'yi gerçek yapan bu):")
+    result = api.probe_feeds()
+    for feed, status in result.items():
+        print(f"  {feed:4s} : {status}")
+    if result.get("sip", "").startswith("OK"):
+        print("\n  → SIP açık: backtest tam tape ile çalışabilir. "
+              "ALPACA_FEED=sip yap.")
+    elif result.get("iex", "").startswith("OK"):
+        print("\n  → Sadece IEX: gerçek printler ama konsolide hacmin ~%2.5'i. "
+              "CVD yönü anlamlı, mutlak hacim değil.")
+    else:
+        print("\n  → Hiçbir feed okunamadı; anahtarları kontrol et.")
+    return 0
+
+
 def cmd_today(cfg, top_n: int) -> int:
     from scanner.today import replay_today
     watchlist, results = replay_today(cfg, top_n=top_n)
@@ -196,7 +224,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="US day-trading scanner")
     parser.add_argument("mode", choices=["demo", "screen", "live", "dashboard",
                                          "backtest", "validate", "today",
-                                         "live-yf"])
+                                         "live-yf", "alpaca-check"])
     parser.add_argument("--date", help="backtest trading day (YYYY-MM-DD)")
     parser.add_argument("--top", type=int, default=10,
                         help="backtest top-N watchlist symbols")
@@ -222,6 +250,8 @@ def main() -> int:
     if args.mode == "validate":
         return cmd_validate(cfg, args.log, args.trades, args.iterations,
                             args.setup)
+    if args.mode == "alpaca-check":
+        return cmd_alpaca_check(cfg)
     if args.mode == "today":
         return cmd_today(cfg, args.top)
     if args.mode == "live-yf":

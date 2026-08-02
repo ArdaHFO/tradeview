@@ -78,6 +78,14 @@ class RiskConfig:
 class Config:
     polygon_api_key: str = field(
         default_factory=lambda: os.environ.get("POLYGON_API_KEY", ""))
+    # Alpaca serves historical trades/quotes on the free plan, which Polygon's
+    # free tier does not -- the only route to real order flow in backtests.
+    alpaca_key_id: str = field(
+        default_factory=lambda: os.environ.get("ALPACA_API_KEY_ID", ""))
+    alpaca_secret_key: str = field(
+        default_factory=lambda: os.environ.get("ALPACA_API_SECRET_KEY", ""))
+    alpaca_feed: str = field(
+        default_factory=lambda: os.environ.get("ALPACA_FEED", "iex"))
     telegram_bot_token: str = field(
         default_factory=lambda: os.environ.get("TELEGRAM_BOT_TOKEN", ""))
     telegram_chat_id: str = field(
