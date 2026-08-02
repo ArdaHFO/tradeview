@@ -17,12 +17,33 @@ aile (konum/VWAP, **order flow/CVD**, yapı, volatilite) ile confluence skorlama
 | `VWAP_REVERSION` | 30 dk sonrası | VWAP'tan ≥2 ATR + CVD divergence + tape yavaşlama | ✅ aktif |
 | `ORB` | 15 dk sonrası | Opening range kırılımı + hacim spike + CVD teyidi | ⛔ varsayılan kapalı |
 
-**2026-07 backtest bulgusu:** aynı 15 günlük pencerede (161 işlem taban) GAP_AND_GO ve
-ORB tutarlı şekilde zararda çıktı (sırasıyla PF 0.35-0.46, iki ayrı parametre
-düzeltmesinden sonra da), VWAP_REVERSION ise tek başına PF 1.23 (55 işlem, %51 win)
-verdi. İkisi de `cfg.signal.disabled_setups` üzerinden varsayılan olarak kapatıldı —
-kod silinmedi, farklı bir piyasa rejiminde tekrar denenebilir. Detaylar için
-`git log --oneline` üzerinde `gap_and_go:` ve `orb:` commit mesajlarına bakın.
+**2026-07/08 bulgusu — üç setup da doğrulamayı geçemedi.** Bootstrap + Monte Carlo
+(`python main.py validate`, aşağıya bakın) ile ölçüldüğünde:
+
+| Setup | Örneklem | Beklenti (R) | %95 güven aralığı | PF | Karar |
+|---|---|---|---|---|---|
+| `GAP_AND_GO` | 41 işlem / 13 seans | −0.425 | −0.735 … −0.085 | 0.43 | **kanıtlanmış zararda** |
+| `ORB` | 65 işlem / 13 seans | −0.376 | −0.660 … −0.055 | 0.54 | **kanıtlanmış zararda** |
+| `VWAP_REVERSION` | 152 işlem / 27 seans | +0.061 | −0.134 … **+0.259** | 1.10 | **kanıtlanmadı** |
+
+GAP_AND_GO ve ORB'un aralığı tamamen sıfırın altında: zararları şans değil sistematik.
+Her biri için iki parametre düzeltmesi + bir araştırma turu denendi (daha geniş stop,
+sert order-flow kapısı, gap tavanı, VWAP yön filtresi); hiçbiri PF'yi 1'in üstüne
+çıkarmadı, ORB'un son hâli 30 günde 1 işlem üretti. İkisi de
+`cfg.signal.disabled_setups` ile kapatıldı — kod silinmedi.
+
+VWAP_REVERSION zarar etmiyor ama **edge'i de kanıtlanmış değil**: PF 1.10'un güven
+aralığı 0.80–1.53, yani başabaşın altı hâlâ makul bir sonuç. Bu etki büyüklüğünü
+kanıtlamak için ~1.580 işlem gerekir (elde 152). Simüle koşuların %27'si zararla
+bitiyor. **Bu yüzden hiçbir setup canlı paraya hazır değil.**
+
+Muhtemel kök neden: free-tier veride tick yok, bu yüzden order flow (CVD, taker
+imbalance) bar şeklinden türetiliyor (`buy_ratio = (close-low)/(high-low)`) — bu da
+CVD'yi fiyatla yapısal olarak korelasyonlu yapıp "order flow teyidi"ni bilgi taşımaz
+hâle getiriyor. Gerçek tick verisi olmadan bu üç setup'ın adil bir testi yapılamıyor.
+
+Detaylar için `git log --oneline` üzerinde `gap_and_go:`, `orb:`, `validation:`
+commit mesajlarına bakın.
 
 **Risk** (`risk.py`): işlem başına %0.5 equity, ATR-stop sizing, günlük -%2
 kill-switch, PDT sayacı, kapanışa son 15 dk giriş yasağı.
@@ -36,9 +57,29 @@ cp .env.example .env        # POLYGON_API_KEY + Telegram bilgilerini doldur
 python main.py demo         # API anahtarsız uçtan uca sentetik test
 python main.py screen       # Polygon ile gerçek stage-1 watchlist
 python main.py live         # watchlist + canlı websocket sinyal akışı (RT plan gerekir)
+python main.py dashboard    # tarayıcı arayüzü → http://localhost:8000
 ```
 
-Testler: `python -m pytest tests/ -q` (42 test).
+### Backtest ve istatistiksel doğrulama
+
+```bash
+# 30 seans geriye backtest, işlemleri JSON'a yaz
+python main.py backtest --days 30 --top 10 --save-trades bt_trades.json
+
+# edge gerçek mi, gürültü mü? (bootstrap + monte carlo)
+python main.py validate --trades bt_trades.json
+python main.py validate --log backtest_baseline_30d.log --setup VWAP_REVERSION
+```
+
+`validate` bir backtest'in profit factor'ünü **nokta tahmini olarak değil güven
+aralığıyla** raporlar; aralık başabaşı içeriyorsa edge kanıtlanmamıştır. Ayrıca
+gözlenen etki büyüklüğünü kanıtlamak için kaç işlem gerektiğini, alternatif
+koşularda drawdown dağılımını ve zararla bitme olasılığını verir. Edge
+kanıtlanmadığında çıkış kodu sıfırdan farklıdır, böylece bir pipeline'ı kesebilir.
+Aynı özet dashboard'da **Backtest Doğrulama** panelinde equity curve ile birlikte
+görünür.
+
+Testler: `python -m pytest tests/ -q` (67 test).
 
 ## Mimari
 
@@ -57,6 +98,9 @@ src/scanner/
 ├── signal/               # confluence scorer + SQLite recorder
 ├── risk.py               # sizing, kill-switch, PDT
 ├── engine.py             # veri yönlendirme + değerlendirme döngüsü
+├── backtest.py           # bias-free minute-bar replay + fill simülasyonu
+├── validation.py         # bootstrap + monte carlo: edge gerçek mi?
+├── dashboard.py          # FastAPI arayüz (watchlist, sinyaller, doğrulama)
 └── alerts/telegram.py    # Telegram bildirimi
 ```
 
@@ -66,3 +110,13 @@ Bu bot **sinyal üretir, emir göndermez** ve hiçbir sinyal "kesin" değildir.
 Edge istatistikseldir: gerçek parayla kullanmadan önce **backtest + 20-30 seans
 paper trading** ile profit factor > 1.3 kanıtlanmalıdır. Her sinyal SQLite'a
 kaydedilir (`signals.db`) — performans analizi bu kayıtlar üzerinden yapılır.
+
+**Şu anki durum: hiçbir setup bu barı geçmiş değil.** Yukarıdaki tabloya bakın —
+iki setup kanıtlanmış şekilde zararda, üçüncüsünün edge'i istatistiksel olarak
+kanıtlanamadı. Bu repo şu an bir **araştırma aracı**, çalışan bir para makinesi
+değil. `validate` komutunun varlık sebebi de bu: iyi görünen bir backtest sayısıyla
+kendini kandırmayı zorlaştırmak.
+
+Bilinen en büyük kısıt, backtest verisinde gerçek tick bulunmaması ve order flow'un
+bar şeklinden türetilmesi. Bu kısıt kalkmadan setup'ların adil bir değerlendirmesi
+mümkün değil.

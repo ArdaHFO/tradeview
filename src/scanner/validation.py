@@ -302,17 +302,31 @@ class Verdict:
 
 def verdict(boot: BootstrapResult, mc: MonteCarloResult,
             pf_target: float = 1.3) -> Verdict:
-    """Turn the statistics into a go / no-go call with the reasoning attached."""
+    """Turn the statistics into a go / no-go call with the reasoning attached.
+
+    Three outcomes, not two: an interval entirely below zero is a *proven loser*,
+    which is a far stronger statement than "unproven" and warrants retiring the
+    setup rather than gathering more data on it.
+    """
     notes: list[str] = []
-    edge_proven = boot.expectancy_r.lo > 0
+    ci = boot.expectancy_r
+    edge_proven = ci.lo > 0
+    proven_loser = ci.hi < 0
 
     if edge_proven:
         head = "EDGE İSTATİSTİKSEL OLARAK ANLAMLI"
+    elif proven_loser:
+        head = "STRATEJİ KANITLANMIŞ ŞEKİLDE ZARARDA"
+        notes.append(
+            f"Beklenti %95 güven aralığı [{ci.lo:+.3f}, {ci.hi:+.3f}] tamamen sıfırın "
+            "altında: bu zarar şans eseri değil, sistematik.")
+        notes.append("Daha fazla veri toplamak bunu kurtarmaz — mantık değişmeli "
+                     "ya da setup kapatılmalı.")
     else:
         head = "EDGE KANITLANMADI — sonuç gürültüden ayırt edilemiyor"
         notes.append(
-            f"Beklenti (ortalama R) %95 güven aralığı [{boot.expectancy_r.lo:+.3f}, "
-            f"{boot.expectancy_r.hi:+.3f}] sıfırı içeriyor: aynı sonuç şansla da çıkabilirdi.")
+            f"Beklenti (ortalama R) %95 güven aralığı [{ci.lo:+.3f}, "
+            f"{ci.hi:+.3f}] sıfırı içeriyor: aynı sonuç şansla da çıkabilirdi.")
         if boot.trades_needed:
             notes.append(
                 f"Bu etki büyüklüğünü kanıtlamak için ~{boot.trades_needed:,} işlem "
@@ -321,22 +335,24 @@ def verdict(boot: BootstrapResult, mc: MonteCarloResult,
             notes.append("Gözlenen beklenti pozitif değil: örneklem büyütmek yetmez, "
                          "stratejinin kendisi değişmeli.")
 
+    # Phrasing note: percentages are kept at the end of each clause so the text
+    # never needs a Turkish case suffix on a number (whose form depends on how
+    # the digits are pronounced).
     if boot.profit_factor.lo < 1.0 <= boot.profit_factor.point:
         notes.append(
             f"PF nokta tahmini {boot.profit_factor.point:.2f} ama alt sınır "
             f"{boot.profit_factor.lo:.2f} — başabaşın altı hâlâ makul bir sonuç.")
     if boot.profit_factor.hi < pf_target:
         notes.append(
-            f"PF üst sınırı {boot.profit_factor.hi:.2f}, hedef {pf_target:.2f}'in altında: "
-            "bu veriyle hedefe ulaşmak istatistiksel olarak mümkün görünmüyor.")
+            f"PF üst sınırı ({boot.profit_factor.hi:.2f}) hedefin "
+            f"({pf_target:.2f}) altında: bu veriyle hedefe ulaşmak istatistiksel "
+            "olarak mümkün görünmüyor.")
     if mc.p_losing_run > 0.05:
-        notes.append(
-            f"Aynı dağılımdan üretilen koşuların %{mc.p_losing_run*100:.0f}'i "
-            "zararla bitiyor.")
+        notes.append("Aynı dağılımdan üretilen koşulardan zararla bitenler: "
+                     f"%{mc.p_losing_run*100:.0f}")
     if mc.p_deep_dd > 0.05:
-        notes.append(
-            f"Koşuların %{mc.p_deep_dd*100:.0f}'inde drawdown sermayenin "
-            f"%{mc.dd_limit_pct:.0f}'ini aşıyor.")
+        notes.append(f"Drawdown'ı sermayenin %{mc.dd_limit_pct:.0f} eşiğini aşan "
+                     f"koşular: %{mc.p_deep_dd*100:.0f}")
     return Verdict(passed=edge_proven, headline=head, notes=notes)
 
 

@@ -175,3 +175,19 @@ def test_validate_passes_a_strong_edge():
     trades = [_trade(2.0) for _ in range(90)] + [_trade(-1.0) for _ in range(30)]
     _, _, vd, _ = validate(trades, start_equity=10_000.0, iterations=1000)
     assert vd.passed
+
+
+def test_validate_calls_out_a_proven_loser_distinctly():
+    """A CI entirely below zero is a systematic loss, not an unproven edge.
+
+    Conflating the two would tell us to gather more data on a setup that should
+    be retired instead.
+    """
+    trades = [_trade(-1.0) for _ in range(80)] + [_trade(0.5) for _ in range(20)]
+    boot, _, vd, report = validate(trades, start_equity=10_000.0, iterations=2000)
+    assert boot.expectancy_r.hi < 0
+    assert not vd.passed
+    assert "ZARARDA" in vd.headline
+    assert "KANITLANMADI" not in vd.headline
+    assert any("sistematik" in n for n in vd.notes)
+    assert "sıfırı içeriyor" not in report      # the straddle wording must not leak
