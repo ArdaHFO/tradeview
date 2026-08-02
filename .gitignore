@@ -15,3 +15,4 @@ watchlist_cache.json
 .cache/
 swing_*.log
 swing_trades*.json
+positions.json

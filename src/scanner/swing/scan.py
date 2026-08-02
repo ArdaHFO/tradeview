@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from .backtest import SwingConfig
+from .positions import exit_level
 from .strategies import Strategy, add_indicators
 
 
@@ -31,6 +32,9 @@ class Candidate:
     notional: float
     rank: float
     reason: str
+    exit_level: float | None    # where the managed exit currently sits
+    exit_rule: str              # what closes the trade
+    max_hold_days: int          # time stop
 
 
 def scan_today(frames: dict[str, pd.DataFrame], strategy: Strategy,
@@ -81,7 +85,10 @@ def scan_today(frames: dict[str, pd.DataFrame], strategy: Strategy,
                              atr=atr_val, stop=stop, risk_per_share=risk_ps,
                              shares=shares, notional=shares * close,
                              rank=float(ent.loc[latest, "rank"]),
-                             reason=str(ent.loc[latest, "reason"])))
+                             reason=str(ent.loc[latest, "reason"]),
+                             exit_level=exit_level(strategy.exit_rule, row),
+                             exit_rule=strategy.exit_rule,
+                             max_hold_days=strategy.max_hold_days))
     out.sort(key=lambda c: -c.rank)
     return out[:cfg.max_positions], latest
 
@@ -96,14 +103,25 @@ def format_scan(cands: list[Candidate], bar_date: pd.Timestamp | None,
     if not cands:
         lines.append("  (bugün sinyal yok)")
         return "\n".join(lines)
-    lines.append(f"  {'SEMBOL':8s}{'KAPANIŞ':>10s}{'STOP':>10s}{'ADET':>7s}"
-                 f"{'TUTAR':>11s}{'RİSK':>9s}  GEREKÇE")
+    first = cands[0]
+    lines.append(f"  {'SEMBOL':8s}{'AL~':>9s}{'STOP':>9s}{'SAT~':>9s}"
+                 f"{'ADET':>6s}{'TUTAR':>10s}{'RİSK':>8s}  GEREKÇE")
     for c in cands:
-        lines.append(f"  {c.symbol:8s}{c.close:>10.2f}{c.stop:>10.2f}"
-                     f"{c.shares:>7d}{c.notional:>11,.0f}"
-                     f"{c.shares * c.risk_per_share:>9,.0f}  {c.reason}")
-    lines += ["",
-              "  ⚠ Giriş bir SONRAKİ seansın AÇILIŞINDA yapılır — backtest böyle",
-              "    doldurdu. Gün içi fiyattan girmek test edilmemiş bir strateji olur.",
-              "  ⚠ Adet, son kapanışa göre tahmindir; gerçek fill açılış fiyatıdır."]
+        ex = f"{c.exit_level:.2f}" if c.exit_level is not None else "—"
+        lines.append(f"  {c.symbol:8s}{c.close:>9.2f}{c.stop:>9.2f}{ex:>9s}"
+                     f"{c.shares:>6d}{c.notional:>10,.0f}"
+                     f"{c.shares * c.risk_per_share:>8,.0f}  {c.reason}")
+    lines += [
+        "",
+        f"  ÇIKIŞ KURALI ({first.exit_rule}) — üç yoldan biriyle kapanır:",
+        "    1) STOP  : fiyat stop seviyesine düşerse (zarar kes)",
+        f"    2) SAT~  : kapanış '{first.exit_rule}' seviyesini geçerse (kâr al)",
+        f"    3) SÜRE  : {first.max_hold_days} seans dolarsa (ne olursa olsun çık)",
+        "",
+        "  ⚠ SAT~ sütunu SABİT bir hedef DEĞİL — o seviye her gün hareket eder.",
+        "    Pozisyonu aldıktan sonra günlük takip için:",
+        "      python main.py swing-positions",
+        "  ⚠ Giriş ve çıkış bir SONRAKİ seansın AÇILIŞINDA yapılır — backtest böyle",
+        "    doldurdu. Gün içi fiyattan işlem test edilmemiş bir strateji olur.",
+        "  ⚠ Adet, son kapanışa göre tahmindir; gerçek fill açılış fiyatıdır."]
     return "\n".join(lines)

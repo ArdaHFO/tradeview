@@ -259,6 +259,66 @@ def cmd_swing_scan(cfg, strategy_name: str, universe_name: str,
     return 0
 
 
+def cmd_swing_positions(universe_name: str, add: str | None,
+                        shares: int, price: float, stop: float,
+                        strategy_name: str, remove: str | None) -> int:
+    """Track open swing positions and say SELL or HOLD on each."""
+    from scanner.swing.data import load_daily, universe
+    from scanner.swing.positions import (Position, format_review,
+                                         load_positions, review,
+                                         save_positions)
+    from scanner.swing.strategies import build
+
+    positions = load_positions()
+
+    if remove:
+        keep = [p for p in positions if p.symbol.upper() != remove.upper()]
+        if len(keep) == len(positions):
+            print(f"{remove}: kayıtlı pozisyon bulunamadı")
+            return 1
+        save_positions(keep)
+        print(f"{remove.upper()} kaldırıldı ({len(keep)} pozisyon kaldı)")
+        return 0
+
+    if add:
+        sym = add.upper()
+        if price <= 0 or shares <= 0:
+            print("hata: --price ve --shares zorunlu (örn. --add AAPL "
+                  "--shares 3 --price 308.91)")
+            return 2
+        if stop <= 0:
+            # Reconstruct the strategy's own stop rather than inventing one.
+            frames = load_daily(universe(universe_name), years=2,
+                                progress=lambda m: print(f"  … {m}"))
+            df = frames.get(sym)
+            if df is None:
+                print(f"hata: {sym} için veri yok (evren: {universe_name})")
+                return 1
+            from scanner.swing.strategies import add_indicators
+            atr_val = float(add_indicators(df).iloc[-1]["atr14"])
+            stop = price - build(strategy_name).stop_atr * atr_val
+            print(f"  stop hesaplandı: {stop:.2f} "
+                  f"({build(strategy_name).stop_atr:g} ATR)")
+        positions = [p for p in positions if p.symbol != sym]
+        positions.append(Position(symbol=sym, strategy=strategy_name,
+                                  entry_date=datetime.now(timezone.utc)
+                                  .date().isoformat(),
+                                  entry_price=price, shares=shares,
+                                  stop=round(stop, 2)))
+        save_positions(positions)
+        print(f"{sym} eklendi: {shares} adet @ {price:.2f}, stop {stop:.2f}")
+        return 0
+
+    if not positions:
+        print(format_review([]))
+        return 0
+    symbols = sorted({p.symbol for p in positions})
+    frames = load_daily(symbols, years=2, progress=lambda m: print(f"  … {m}"))
+    print()
+    print(format_review(review(positions, frames, build)))
+    return 0
+
+
 def cmd_alpaca_check(cfg) -> int:
     """Report what this Alpaca key can actually read — iex only, or full SIP."""
     from scanner.data.alpaca import AlpacaData, AlpacaError
@@ -324,7 +384,7 @@ def main() -> int:
     parser.add_argument("mode", choices=["demo", "screen", "live", "dashboard",
                                          "backtest", "validate", "today",
                                          "live-yf", "alpaca-check", "swing",
-                                         "swing-scan"])
+                                         "swing-scan", "swing-positions"])
     parser.add_argument("--date", help="backtest trading day (YYYY-MM-DD)")
     parser.add_argument("--top", type=int, default=10,
                         help="backtest top-N watchlist symbols")
@@ -348,6 +408,17 @@ def main() -> int:
                         help="swing: sp500 | fallback")
     parser.add_argument("--max-positions", type=int, default=10,
                         help="swing: concurrent position slots")
+    parser.add_argument("--add", metavar="SYMBOL",
+                        help="swing-positions: record a fill")
+    parser.add_argument("--remove", metavar="SYMBOL",
+                        help="swing-positions: drop a closed position")
+    parser.add_argument("--shares", type=int, default=0,
+                        help="swing-positions: share count for --add")
+    parser.add_argument("--price", type=float, default=0.0,
+                        help="swing-positions: fill price for --add")
+    parser.add_argument("--stop", type=float, default=0.0,
+                        help="swing-positions: stop for --add "
+                             "(default: strategy's own ATR stop)")
     parser.add_argument("--oos-from", default="",
                         help="swing: split date (YYYY-MM-DD) for an "
                              "out-of-sample check")
@@ -365,6 +436,11 @@ def main() -> int:
         return cmd_swing(cfg, args.strategy, args.years, args.universe,
                          args.max_positions, args.save_trades, args.iterations,
                          args.oos_from)
+    if args.mode == "swing-positions":
+        strat = "meanrev" if args.strategy == "all" else args.strategy
+        return cmd_swing_positions(args.universe, args.add,
+                                   args.shares, args.price, args.stop,
+                                   strat, args.remove)
     if args.mode == "swing-scan":
         return cmd_swing_scan(cfg, args.strategy, args.universe,
                               args.max_positions)
