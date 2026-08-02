@@ -1,14 +1,14 @@
 """Template C -- Opening Range Breakout: break of the first-15-min range,
 validated by volume spike + CVD direction (order flow filters fake breakouts).
 
-Two research-backed filters added after backtest showed the plain breakout
-losing (PF 0.46 across two earlier fix attempts):
-  1. VWAP directional bias -- a range that formed entirely above VWAP favors
-     long breakouts, entirely below favors shorts (mixed range = no trade).
-  2. Two-bar sustain -- the prior bar must also have closed beyond the range,
-     so a single noise-tick poke through the level doesn't count as a breakout
-     (a cheap proxy for "wait for a retest", the strongest false-breakout
-     filter found in ORB literature).
+A research-backed VWAP directional bias filter was added after backtest showed
+the plain breakout losing (PF 0.46 across two earlier fix attempts): a range
+that formed entirely above VWAP favors long breakouts, entirely below favors
+shorts (mixed range = no trade). A stricter "2 consecutive closes past the
+level" sustain filter was also tried but, combined with the existing 3x
+volume-spike and order-flow-magnitude gates, produced zero trades across a
+30-day backtest on this screener's typical thin/illiquid names -- these
+breakouts rarely sustain a second full bar, so that filter was dropped.
 
 Stop: opposite side of the opening range (capped at 1.5 ATR from entry).
 """
@@ -47,14 +47,11 @@ class OpeningRangeBreakout(Strategy):
         vol_spike = bar.volume / avg_vol
         imb = ctx.flow.taker_imbalance()
         slope = ctx.flow.cvd_slope(minutes=3) or 0.0
-        prev_bar = ctx.bars_1m[-2] if len(ctx.bars_1m) >= 2 else None
 
         if price > or_high + BREAKOUT_MARGIN_ATR * atr_1m:
             side = Side.LONG
             if vwap is not None and or_low <= vwap:
                 return None                       # range not cleanly above VWAP: no long bias
-            if prev_bar is None or prev_bar.close <= or_high:
-                return None                       # need 2 consecutive closes past the level
             # order flow must clearly agree with the breakout direction
             if slope <= 0 or imb < MIN_TAKER_IMBALANCE:
                 return None
@@ -66,8 +63,6 @@ class OpeningRangeBreakout(Strategy):
             side = Side.SHORT
             if vwap is not None and or_high >= vwap:
                 return None                       # range not cleanly below VWAP: no short bias
-            if prev_bar is None or prev_bar.close >= or_low:
-                return None
             if slope >= 0 or imb > -MIN_TAKER_IMBALANCE:
                 return None
             entry = price
