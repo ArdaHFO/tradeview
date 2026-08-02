@@ -90,8 +90,14 @@ aile (konum/VWAP, **order flow/CVD**, yapı, volatilite) ile confluence skorlama
 | Setup | Örneklem | Beklenti (R) | %95 güven aralığı | PF | Karar |
 |---|---|---|---|---|---|
 | `GAP_AND_GO` | 41 işlem / 13 seans | −0.425 | −0.735 … −0.085 | 0.43 | **kanıtlanmış zararda** |
+| `GAP_AND_GO` +gap tavanı | 44 işlem / 22 seans | −0.084 | −0.431 … +0.271 | 0.86 | kanıtlanmadı |
 | `ORB` | 65 işlem / 13 seans | −0.376 | −0.660 … −0.055 | 0.54 | **kanıtlanmış zararda** |
 | `VWAP_REVERSION` | 152 işlem / 27 seans | +0.061 | −0.134 … **+0.259** | 1.10 | **kanıtlanmadı** |
+
+`MAX_GAP_PCT = 20` tavanı (aşırı esnemiş gapleri elemek) GAP_AND_GO'yu
+"kanıtlanmış zararda"dan "kanıtlanmadı"ya taşıdı — PF 0.43 → 0.86, güven aralığı
+artık sıfırı içeriyor. Yani filtre **işe yaradı**, ama beklenti hâlâ negatif ve
+44 işlem karar vermek için az. Setup kapalı kalıyor.
 
 GAP_AND_GO ve ORB'un aralığı tamamen sıfırın altında: zararları şans değil sistematik.
 Her biri için iki parametre düzeltmesi + bir araştırma turu denendi (daha geniş stop,
